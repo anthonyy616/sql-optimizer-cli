@@ -1,0 +1,74 @@
+[package]
+name = "sql-optimizer-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "Intelligent SQL query optimization advisor for PostgreSQL and MySQL"
+license = "MIT"
+repository = "https://github.com/yourusername/sql-optimizer-cli"
+keywords = ["sql", "database", "optimization", "postgresql", "mysql"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# CLI Framework
+clap = { version = "4.4", features = ["derive", "env"] }
+dialoguer = "0.11"
+indicatif = "0.17"
+crossterm = "0.27"
+
+# SQL Parsing
+sqlparser = { version = "0.38", features = ["visitor"] }
+
+# Database Drivers
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+mysql_async = "0.33"
+tokio = { version = "1.34", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Error Handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Utilities
+regex = "1.10"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal/Output
+colored = "2.1"
+console = "0.15"
+tabled = "0.15"
+
+# Configuration
+config = "0.13"
+dirs = "5.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3.8"
+mockall = "0.12"
+criterion = "0.5"
+
+[[bin]]
+name = "sql-optimizer-cli"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = true

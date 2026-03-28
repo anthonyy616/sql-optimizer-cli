@@ -1,0 +1,111 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Local development
+.env
+.env.local
+.env.*.local
+local.toml
+config/local.toml
+*.log
+logs/
+
+# Test artifacts
+/coverage/
+*.profraw
+*.gcda
+*.gcno
+lcov.info
+
+# Build artifacts
+sql-optimizer-cli
+sql-optimizer-cli.exe
+sql-optimizer-cli-*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Package files
+*.tar.gz
+*.zip
+*.dmg
+*.deb
+*.rpm
+
+# Documentation build
+docs/_build/
+docs/site/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Editor directories
+.vim/
+.emacs/
+
+# Node.js (if any web components are added later)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Performance profiling
+perf.data
+*.perf
+*.profile
+
+# Security
+*.pem
+*.key
+*.crt
+secrets/
+private/
+
+# Rust toolchain
+rust-toolchain.toml
+.rustup/
+
+# Cross-compilation
+**/target/*/debug/
+**/target/*/release/
+
+# Benchmarks
+benches/output/
+criterion/
+
+# Clippy
+clippy.toml
+
+# Personal
+.agent/
+personal/
+

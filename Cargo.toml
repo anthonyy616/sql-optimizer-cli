@@ -15,6 +15,7 @@ clap = { version = "4.4", features = ["derive", "env"] }
 dialoguer = "0.11"
 indicatif = "0.17"
 crossterm = "0.27"
+async-trait = "0.1"
 
 # SQL Parsing
 sqlparser = { version = "0.38", features = ["visitor"] }
@@ -53,7 +54,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async utilities
 futures = "0.3"
-async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -72,3 +72,4 @@ strip = true
 
 [profile.dev]
 debug = true
+

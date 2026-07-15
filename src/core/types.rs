@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use clap::ValueEnum;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Copy, Clone)] 
 pub enum DatabaseType {
     PostgreSQL,
     MySQL,

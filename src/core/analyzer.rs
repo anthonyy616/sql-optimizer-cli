@@ -1,25 +1,19 @@
-use anyhow::{Result, Context};
-use sqlparser::ast::{Query, SetExpr, Statement, Select};
-use sqlparser::dialect::{GenericDialect, PostgreSqlDialect, MySqlDialect};
+use anyhow::{Context, Result};
+use sqlparser::ast::{Query, Select, SetExpr, Statement};
+use sqlparser::dialect::{GenericDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
 use crate::core::types::*;
-use crate::database::connection::DatabaseConnector;
 
-pub struct SqlAnalyzer {
-    database_connector: Option<Box<dyn DatabaseConnector>>,
-}
+pub struct SqlAnalyzer;
 
 impl SqlAnalyzer {
     pub fn new() -> Self {
-        Self {
-            database_connector: None,
-        }
+        Self
     }
 
-    pub fn with_database(mut self, connector: Box<dyn DatabaseConnector>) -> Self {
-        self.database_connector = Some(connector);
-        self
+    pub fn with_database(&self) -> Self {
+        Self::new()
     }
 
     pub fn parse_query(&self, query: &str, dialect: &str) -> Result<Vec<Statement>> {
@@ -35,32 +29,29 @@ impl SqlAnalyzer {
         Ok(statements)
     }
 
-    pub fn analyze_query(&self, query: &str, db_type: DatabaseType) -> Result<AnalysisResult> {
+    pub async fn analyze_query(&self, query: &str, db_type: DatabaseType) -> Result<AnalysisResult> {
         let start_time = std::time::Instant::now();
-        
-        // Parse the query
+
         let dialect = match db_type {
             DatabaseType::PostgreSQL => "postgresql",
             DatabaseType::MySQL => "mysql",
         };
-        
+
         let statements = self.parse_query(query, dialect)?;
-        
+
         let mut recommendations = Vec::new();
         let mut security_issues = Vec::new();
-        
-        // Basic analysis for each statement
+
         for statement in &statements {
             if let Statement::Query(query_box) = statement {
-                self.analyze_select_query(&query_box, &mut recommendations)?;
+                self.analyze_select_query(query_box, query, &mut recommendations, db_type).await?;
             }
         }
-        
-        // Basic security analysis
+
         self.basic_security_analysis(query, &mut security_issues)?;
-        
+
         let execution_time = start_time.elapsed().as_millis() as u64;
-        
+
         Ok(AnalysisResult {
             query: query.to_string(),
             database_type: db_type,
@@ -71,18 +62,30 @@ impl SqlAnalyzer {
         })
     }
 
-    fn analyze_select_query(&self, query_box: &Query, recommendations: &mut Vec<Recommendation>) -> Result<()> {
-        // Look for basic patterns that can be optimized
+    async fn analyze_select_query(
+        &self,
+        query_box: &Query,
+        query: &str,
+        recommendations: &mut Vec<Recommendation>,
+        db_type: DatabaseType,
+    ) -> Result<()> {
         if let SetExpr::Select(select) = &*query_box.body {
-            self.analyze_select_statement(select, recommendations)?;
+            self.analyze_select_statement(select, query, recommendations, db_type).await?;
         }
+
         Ok(())
     }
 
-    fn analyze_select_statement(&self, select: &Select, recommendations: &mut Vec<Recommendation>) -> Result<()> {
-        // Check for SELECT * without WHERE clause
-        if select.projection.iter().any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_))) 
-            && select.selection.is_none() {
+    async fn analyze_select_statement(
+        &self,
+        select: &Select,
+        query: &str,
+        recommendations: &mut Vec<Recommendation>,
+        db_type: DatabaseType,
+    ) -> Result<()> {
+        if select.projection.iter().any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)))
+            && select.selection.is_none()
+        {
             recommendations.push(Recommendation {
                 recommendation_type: RecommendationType::QueryRewrite,
                 table: None,
@@ -92,32 +95,76 @@ impl SqlAnalyzer {
                 sql_suggestion: Some("Consider adding specific columns and WHERE clause if not all data is needed".to_string()),
             });
         }
-        
-        // Check for basic N+1 patterns
+
         if let Some(where_clause) = &select.selection {
             self.check_for_n_plus_one_patterns(where_clause, recommendations)?;
         }
-        
+
+        if db_type == DatabaseType::MySQL {
+            self.mysql_enhanced_analysis(query, recommendations).await?;
+        }
+
         Ok(())
     }
 
-    fn check_for_n_plus_one_patterns(&self, where_clause: &sqlparser::ast::Expr, recommendations: &mut Vec<Recommendation>) -> Result<()> {
-        // Simple check for IN subqueries that could be JOINs
-        if let sqlparser::ast::Expr::InSubquery { .. } = where_clause {
+    fn check_for_n_plus_one_patterns(
+        &self,
+        where_clause: &sqlparser::ast::Expr,
+        recommendations: &mut Vec<Recommendation>,
+    ) -> Result<()> {
+        match where_clause {
+            sqlparser::ast::Expr::InSubquery { .. } => {
+                recommendations.push(Recommendation {
+                    recommendation_type: RecommendationType::NPlusOneQuery,
+                    table: None,
+                    columns: vec![],
+                    description: "IN subquery detected - consider using JOIN instead".to_string(),
+                    estimated_improvement: 0.5,
+                    sql_suggestion: Some("Replace IN subquery with INNER JOIN for better performance".to_string()),
+                });
+            }
+            sqlparser::ast::Expr::BinaryOp {
+                left,
+                op: sqlparser::ast::BinaryOperator::Eq,
+                right,
+            } => {
+                if self.is_correlated_subquery(left) || self.is_correlated_subquery(right) {
+                    recommendations.push(Recommendation {
+                        recommendation_type: RecommendationType::NPlusOneQuery,
+                        table: None,
+                        columns: vec![],
+                        description: "Correlated subquery detected - consider using JOIN instead".to_string(),
+                        estimated_improvement: 0.6,
+                        sql_suggestion: Some("Correlated subqueries are often slower than JOINs".to_string()),
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn is_correlated_subquery(&self, expr: &sqlparser::ast::Expr) -> bool {
+        matches!(expr, sqlparser::ast::Expr::Subquery(_))
+    }
+
+    async fn mysql_enhanced_analysis(&self, query: &str, recommendations: &mut Vec<Recommendation>) -> Result<()> {
+        if query.to_lowercase().contains("select *") {
             recommendations.push(Recommendation {
-                recommendation_type: RecommendationType::NPlusOneQuery,
+                recommendation_type: RecommendationType::QueryRewrite,
                 table: None,
                 columns: vec![],
-                description: "IN subquery detected - consider using JOIN instead".to_string(),
-                estimated_improvement: 0.5,
-                sql_suggestion: Some("Replace IN subquery with INNER JOIN for better performance".to_string()),
+                description: "SELECT * in MySQL can be slower than explicit column lists".to_string(),
+                estimated_improvement: 0.2,
+                sql_suggestion: Some("Specify only the columns you need instead of SELECT *".to_string()),
             });
         }
+
         Ok(())
     }
 
     fn basic_security_analysis(&self, query: &str, issues: &mut Vec<SecurityIssue>) -> Result<()> {
-        // Check for obvious SQL injection patterns
         let dangerous_patterns = [
             "union select",
             "drop table",
@@ -128,7 +175,7 @@ impl SqlAnalyzer {
             "execute(",
             "sp_executesql",
         ];
-        
+
         let query_lower = query.to_lowercase();
         for pattern in dangerous_patterns {
             if query_lower.contains(pattern) {
@@ -140,7 +187,7 @@ impl SqlAnalyzer {
                 });
             }
         }
-        
+
         Ok(())
     }
 }

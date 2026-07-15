@@ -1,35 +1,249 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use regex::Regex;
+use tokio_postgres::config::SslMode;
+use tokio_postgres::{Client, NoTls};
 
-use crate::core::types::DatabaseType;
+use crate::core::types::{
+    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, SchemaSnapshot, TableSchema,
+};
 use crate::database::connection::DatabaseConnector;
 
 pub struct PostgresConnector {
-    connected: bool,
+    client: Option<Client>,
 }
 
 impl PostgresConnector {
     pub fn new() -> Self {
-        Self { connected: false }
+        Self { client: None }
+    }
+
+    fn parse_index_columns(index_def: &str) -> Vec<String> {
+        let re = Regex::new(r"\((?P<cols>[^\)]+)\)").expect("valid postgres index regex");
+        let cols = re
+            .captures(index_def)
+            .and_then(|caps| caps.name("cols"))
+            .map(|m| m.as_str())
+            .unwrap_or_default();
+
+        cols.split(',')
+            .map(|c| c.trim().trim_matches('"').to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
+    fn parse_plan_node(value: &serde_json::Value) -> QueryPlanNode {
+        let node_type = value
+            .get("Node Type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unknown")
+            .to_string();
+        let cost = value
+            .get("Total Cost")
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| {
+                value
+                    .get("Startup Cost")
+                    .and_then(serde_json::Value::as_f64)
+            });
+        let rows = value.get("Plan Rows").and_then(serde_json::Value::as_f64);
+        let index_used = value
+            .get("Index Name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+
+        let children = value
+            .get("Plans")
+            .and_then(serde_json::Value::as_array)
+            .map(|plans| plans.iter().map(Self::parse_plan_node).collect())
+            .unwrap_or_default();
+
+        QueryPlanNode {
+            node_type,
+            cost,
+            rows,
+            index_used,
+            children,
+        }
+    }
+}
+
+impl Default for PostgresConnector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl DatabaseConnector for PostgresConnector {
     async fn connect(&mut self, connection_string: &str) -> Result<()> {
-        println!("Connecting to PostgreSQL: {}", connection_string);
-        // TODO: Implement actual PostgreSQL connection
-        self.connected = true;
+        let config: tokio_postgres::Config = connection_string
+            .parse()
+            .with_context(|| "Invalid PostgreSQL connection string")?;
+
+        let ssl_mode = config.get_ssl_mode();
+
+        if ssl_mode == SslMode::Require {
+            let tls = native_tls::TlsConnector::builder()
+                .build()
+                .with_context(|| "Failed to build TLS connector")?;
+            let tls_connector = postgres_native_tls::MakeTlsConnector::new(tls);
+            let (client, connection) = config
+                .connect(tls_connector)
+                .await
+                .with_context(|| "Failed to connect to PostgreSQL with TLS")?;
+
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("PostgreSQL connection error: {e}");
+                }
+            });
+
+            self.client = Some(client);
+            return Ok(());
+        }
+
+        let (client, connection) = config
+            .connect(NoTls)
+            .await
+            .with_context(|| "Failed to connect to PostgreSQL")?;
+
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("PostgreSQL connection error: {e}");
+            }
+        });
+
+        self.client = Some(client);
         Ok(())
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.connected = false;
+        self.client = None;
         Ok(())
     }
 
     async fn test_connection(&self) -> Result<bool> {
-        Ok(self.connected)
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
+
+        let row = client
+            .query_one("SELECT 1", &[])
+            .await
+            .with_context(|| "PostgreSQL health check failed")?;
+        let value: i32 = row.get(0);
+
+        Ok(value == 1)
+    }
+
+    async fn introspect_schema(&self) -> Result<SchemaSnapshot> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
+
+        let table_rows = client
+            .query(
+                "
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                ",
+                &[],
+            )
+            .await
+            .with_context(|| "Failed to read PostgreSQL table list")?;
+
+        let mut tables = Vec::new();
+        for table_row in table_rows {
+            let table_name: String = table_row.get("table_name");
+
+            let column_rows = client
+                .query(
+                    "
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = $1
+                    ORDER BY ordinal_position
+                    ",
+                    &[&table_name],
+                )
+                .await
+                .with_context(|| format!("Failed to read columns for table '{table_name}'"))?;
+
+            let columns = column_rows
+                .iter()
+                .map(|row| ColumnInfo {
+                    name: row.get("column_name"),
+                    data_type: row.get("data_type"),
+                })
+                .collect::<Vec<_>>();
+
+            let index_rows = client
+                .query(
+                    "
+                    SELECT indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = 'public' AND tablename = $1
+                    ORDER BY indexname
+                    ",
+                    &[&table_name],
+                )
+                .await
+                .with_context(|| format!("Failed to read indexes for table '{table_name}'"))?;
+
+            let indexes = index_rows
+                .iter()
+                .map(|row| {
+                    let name: String = row.get("indexname");
+                    let index_def: String = row.get("indexdef");
+                    IndexInfo {
+                        name,
+                        columns: Self::parse_index_columns(&index_def),
+                        is_unique: index_def.to_uppercase().contains(" UNIQUE "),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            tables.push(TableSchema {
+                name: table_name,
+                columns,
+                indexes,
+            });
+        }
+
+        Ok(SchemaSnapshot { tables })
+    }
+
+    async fn explain_query(&self, query: &str) -> Result<QueryPlan> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
+
+        let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}");
+        let row = client
+            .query_one(&explain_sql, &[])
+            .await
+            .with_context(|| "Failed to run PostgreSQL EXPLAIN")?;
+
+        let raw: serde_json::Value = row.get(0);
+        let plan_value = raw
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|obj| obj.get("Plan"))
+            .cloned();
+
+        let root = plan_value.as_ref().map(Self::parse_plan_node);
+
+        Ok(QueryPlan {
+            engine: "postgresql".to_string(),
+            root,
+            raw,
+        })
     }
 
     fn database_type(&self) -> DatabaseType {

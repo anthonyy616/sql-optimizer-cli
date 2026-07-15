@@ -23,7 +23,10 @@ impl OutputFormatter {
     fn format_text(&self, result: &AnalysisResult) -> Result<()> {
         println!("{}", "SQL Analysis Results".bold().cyan());
         println!("{}", "===================".bold().cyan());
-        println!("Query: {}", &result.query[..std::cmp::min(result.query.len(), 60)]);
+        println!(
+            "Query: {}",
+            &result.query[..std::cmp::min(result.query.len(), 60)]
+        );
         if result.query.len() > 60 {
             println!("...");
         }
@@ -39,7 +42,10 @@ impl OutputFormatter {
                 if let Some(suggestion) = &rec.sql_suggestion {
                     println!("   Suggestion: {}", suggestion.dimmed());
                 }
-                println!("   Estimated improvement: {:.1}%", rec.estimated_improvement * 100.0);
+                println!(
+                    "   Estimated improvement: {:.1}%",
+                    rec.estimated_improvement * 100.0
+                );
                 println!();
             }
         } else {
@@ -61,6 +67,38 @@ impl OutputFormatter {
                 };
                 println!("{}. {}", i + 1, issue.description.color(severity_color));
                 println!("   Severity: {:?}", issue.severity);
+            }
+        }
+
+        if let Some(schema) = &result.schema_snapshot {
+            println!();
+            println!("{}", "SCHEMA SNAPSHOT:".bold().blue());
+            println!("Tables discovered: {}", schema.tables.len());
+            for table in schema.tables.iter().take(5) {
+                println!(
+                    "- {} ({} columns, {} indexes)",
+                    table.name,
+                    table.columns.len(),
+                    table.indexes.len()
+                );
+            }
+        }
+
+        if let Some(plan) = &result.explain_plan {
+            println!();
+            println!("{}", "EXPLAIN PLAN:".bold().cyan());
+            println!("Engine: {}", plan.engine);
+            if let Some(root) = &plan.root {
+                println!("Root node: {}", root.node_type);
+                if let Some(rows) = root.rows {
+                    println!("Estimated rows: {}", rows);
+                }
+                if let Some(cost) = root.cost {
+                    println!("Estimated cost: {}", cost);
+                }
+                if let Some(index) = &root.index_used {
+                    println!("Index used: {}", index);
+                }
             }
         }
 

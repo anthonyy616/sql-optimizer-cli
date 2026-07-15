@@ -1,70 +1,112 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use mysql_async::prelude::*;
-use mysql_async::{Pool, OptsBuilder};
+use mysql_async::prelude::Queryable;
+use mysql_async::{Opts, Pool};
+use regex::Regex;
 
-use crate::core::types::DatabaseType;
+use crate::core::types::{
+    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, SchemaSnapshot, TableSchema,
+};
 use crate::database::connection::DatabaseConnector;
 
 pub struct MySqlConnector {
     pool: Option<Pool>,
-    database_type: DatabaseType,
+    database_name: Option<String>,
 }
 
 impl MySqlConnector {
     pub fn new() -> Self {
         Self {
             pool: None,
-            database_type: DatabaseType::MySQL,
+            database_name: None,
         }
+    }
+
+    fn parse_index_columns(index_def: &str) -> Vec<String> {
+        let re = Regex::new(r"\((?P<cols>[^\)]+)\)").expect("valid mysql index regex");
+        let cols = re
+            .captures(index_def)
+            .and_then(|caps| caps.name("cols"))
+            .map(|m| m.as_str())
+            .unwrap_or_default();
+
+        cols.split(',')
+            .map(|c| c.trim().trim_matches('`').to_string())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
+    fn parse_mysql_plan_node(node: &serde_json::Value) -> Option<QueryPlanNode> {
+        let table_name = node
+            .get("table_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let access_type = node
+            .get("access_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("scan");
+        let rows = node
+            .get("rows_examined_per_scan")
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| {
+                node.get("rows_produced_per_join")
+                    .and_then(serde_json::Value::as_f64)
+            });
+        let cost = node
+            .get("cost_info")
+            .and_then(|v| v.get("query_cost"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse::<f64>().ok());
+        let index_used = node
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+
+        Some(QueryPlanNode {
+            node_type: format!("{access_type}:{table_name}"),
+            cost,
+            rows,
+            index_used,
+            children: Vec::new(),
+        })
+    }
+}
+
+impl Default for MySqlConnector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl DatabaseConnector for MySqlConnector {
     async fn connect(&mut self, connection_string: &str) -> Result<()> {
-        println!("Connecting to MySQL: {}", connection_string);
-        
-        // Parse connection string (basic parsing)
-        let parts: Vec<&str> = connection_string.split('@').collect();
-        if parts.len() != 2 {
-            return Err(anyhow::anyhow!("Invalid MySQL connection string format"));
+        let opts = Opts::from_url(connection_string).with_context(|| {
+            "Invalid MySQL connection URL. Expected mysql://user:pass@host:port/db"
+        })?;
+
+        let db_name = opts
+            .get_db_name()
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow!("MySQL connection URL must include a database name"))?;
+
+        let pool = Pool::new(opts);
+
+        let mut conn = pool
+            .get_conn()
+            .await
+            .with_context(|| "Failed to connect to MySQL")?;
+        let ping: Option<u8> = conn
+            .query_first("SELECT 1")
+            .await
+            .with_context(|| "MySQL health check failed")?;
+        if ping != Some(1) {
+            return Err(anyhow!("MySQL health check returned unexpected result"));
         }
-
-        let user_parts: Vec<&str> = parts[0].split(':').collect();
-        let host_parts: Vec<&str> = parts[1].split(':').collect();
-        if user_parts.len() < 2 || host_parts.len() < 2 {
-            return Err(anyhow::anyhow!("Invalid MySQL connection string format"));
-        }
-
-        let username = user_parts[0];
-        let password = user_parts[1];
-        let host = host_parts[0];
-        let port_db = host_parts[1];
-        
-        let port_parts = port_db.split('/').collect::<Vec<&str>>();
-        if port_parts.len() < 2 {
-            return Err(anyhow::anyhow!("Invalid MySQL connection string format"));
-        }
-        
-        let port = port_parts[0].parse::<u16>().unwrap_or(3306);
-        let database = port_parts[1];
-
-        // Create connection pool
-        let pool = Pool::new(OptsBuilder::default()
-            .user(Some(username))
-            .pass(Some(password))
-            .ip_or_hostname(host)
-            .tcp_port(port)
-            .db_name(Some(database)));
-
-        // Test the connection
-        let mut conn = pool.get_conn().await?;
-        let _: Vec<mysql_async::Row> = conn.query("SELECT 1").await?;
         drop(conn);
 
+        self.database_name = Some(db_name);
         self.pool = Some(pool);
-        println!("Successfully connected to MySQL database: {}", database);
         Ok(())
     }
 
@@ -76,21 +118,152 @@ impl DatabaseConnector for MySqlConnector {
     }
 
     async fn test_connection(&self) -> Result<bool> {
-        match &self.pool {
-            Some(pool) => {
-                match pool.get_conn().await {
-                    Ok(conn) => {
-                        drop(conn);
-                        Ok(true)
-                    }
-                    Err(_) => Ok(false)
-                }
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("MySQL pool is not initialized"))?;
+
+        let mut conn = pool
+            .get_conn()
+            .await
+            .with_context(|| "Failed to fetch MySQL connection from pool")?;
+        let ping: Option<u8> = conn
+            .query_first("SELECT 1")
+            .await
+            .with_context(|| "MySQL health check failed")?;
+        drop(conn);
+
+        Ok(ping == Some(1))
+    }
+
+    async fn introspect_schema(&self) -> Result<SchemaSnapshot> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("MySQL pool is not initialized"))?;
+        let db_name = self
+            .database_name
+            .as_ref()
+            .ok_or_else(|| anyhow!("MySQL database name is not initialized"))?;
+
+        let mut conn = pool
+            .get_conn()
+            .await
+            .with_context(|| "Failed to get MySQL connection for schema introspection")?;
+
+        let table_rows: Vec<String> = conn
+            .exec_map(
+                "
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = ? AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+                ",
+                (db_name.clone(),),
+                |table_name: String| table_name,
+            )
+            .await
+            .with_context(|| "Failed to read MySQL table list")?;
+
+        let mut tables = Vec::new();
+        for table_name in table_rows {
+            let columns: Vec<ColumnInfo> = conn
+                .exec_map(
+                    "
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = ? AND table_name = ?
+                    ORDER BY ordinal_position
+                    ",
+                    (db_name.clone(), table_name.clone()),
+                    |(name, data_type): (String, String)| ColumnInfo { name, data_type },
+                )
+                .await
+                .with_context(|| format!("Failed to read columns for table '{table_name}'"))?;
+
+            let index_rows: Vec<(String, String, u8)> = conn
+                .exec_map(
+                    "
+                    SELECT index_name, column_name, non_unique
+                    FROM information_schema.statistics
+                    WHERE table_schema = ? AND table_name = ?
+                    ORDER BY index_name, seq_in_index
+                    ",
+                    (db_name.clone(), table_name.clone()),
+                    |(index_name, column_name, non_unique): (String, String, u8)| {
+                        (index_name, column_name, non_unique)
+                    },
+                )
+                .await
+                .with_context(|| format!("Failed to read indexes for table '{table_name}'"))?;
+
+            let mut indexes_map = std::collections::BTreeMap::new();
+            for (index_name, column_name, non_unique) in index_rows {
+                let entry = indexes_map
+                    .entry(index_name.clone())
+                    .or_insert_with(|| IndexInfo {
+                        name: index_name.clone(),
+                        columns: Vec::new(),
+                        is_unique: non_unique == 0,
+                    });
+                entry.columns.push(column_name);
             }
-            None => Ok(false)
+            let indexes = indexes_map.into_values().collect::<Vec<_>>();
+
+            tables.push(TableSchema {
+                name: table_name,
+                columns,
+                indexes,
+            });
         }
+
+        drop(conn);
+        Ok(SchemaSnapshot { tables })
+    }
+
+    async fn explain_query(&self, query: &str) -> Result<QueryPlan> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("MySQL pool is not initialized"))?;
+
+        let mut conn = pool
+            .get_conn()
+            .await
+            .with_context(|| "Failed to get MySQL connection for EXPLAIN")?;
+
+        let explain_sql = format!("EXPLAIN FORMAT=JSON {query}");
+        let raw_json: Option<String> = conn
+            .query_first(explain_sql)
+            .await
+            .with_context(|| "Failed to run MySQL EXPLAIN")?;
+        drop(conn);
+
+        let raw_str = raw_json.ok_or_else(|| anyhow!("MySQL EXPLAIN returned no rows"))?;
+        let raw: serde_json::Value =
+            serde_json::from_str(&raw_str).with_context(|| "Failed to parse MySQL EXPLAIN JSON")?;
+
+        let root = raw
+            .get("query_block")
+            .and_then(|qb| qb.get("table"))
+            .and_then(Self::parse_mysql_plan_node)
+            .or_else(|| {
+                raw.get("query_block")
+                    .and_then(|qb| qb.get("nested_loop"))
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|entry| entry.get("table"))
+                    .and_then(Self::parse_mysql_plan_node)
+            });
+
+        Ok(QueryPlan {
+            engine: "mysql".to_string(),
+            root,
+            raw,
+        })
     }
 
     fn database_type(&self) -> DatabaseType {
-        self.database_type.clone()
+        DatabaseType::MySQL
     }
 }

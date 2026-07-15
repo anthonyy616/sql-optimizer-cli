@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.rs text working-tree-encoding=UTF-8
+*.md text working-tree-encoding=UTF-8
+*.toml text working-tree-encoding=UTF-8
+*.sh text working-tree-encoding=UTF-8
+Makefile text working-tree-encoding=UTF-8

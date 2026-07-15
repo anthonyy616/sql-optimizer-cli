@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sqlparser::ast::{Query, Select, SetExpr, Statement};
-use sqlparser::dialect::{GenericDialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 
 use crate::core::types::*;
@@ -18,8 +18,11 @@ impl SqlAnalyzer {
 
     pub fn parse_query(&self, query: &str, dialect: &str) -> Result<Vec<Statement>> {
         let dialect = match dialect.to_lowercase().as_str() {
-            "postgresql" | "postgres" => Box::new(PostgreSqlDialect {}) as Box<dyn sqlparser::dialect::Dialect>,
+            "postgresql" | "postgres" => {
+                Box::new(PostgreSqlDialect {}) as Box<dyn sqlparser::dialect::Dialect>
+            }
             "mysql" => Box::new(MySqlDialect {}) as Box<dyn sqlparser::dialect::Dialect>,
+            "sqlite" => Box::new(SQLiteDialect {}) as Box<dyn sqlparser::dialect::Dialect>,
             _ => Box::new(GenericDialect {}) as Box<dyn sqlparser::dialect::Dialect>,
         };
 
@@ -29,12 +32,17 @@ impl SqlAnalyzer {
         Ok(statements)
     }
 
-    pub async fn analyze_query(&self, query: &str, db_type: DatabaseType) -> Result<AnalysisResult> {
+    pub async fn analyze_query(
+        &self,
+        query: &str,
+        db_type: DatabaseType,
+    ) -> Result<AnalysisResult> {
         let start_time = std::time::Instant::now();
 
         let dialect = match db_type {
             DatabaseType::PostgreSQL => "postgresql",
             DatabaseType::MySQL => "mysql",
+            DatabaseType::SQLite => "sqlite",
         };
 
         let statements = self.parse_query(query, dialect)?;
@@ -44,7 +52,8 @@ impl SqlAnalyzer {
 
         for statement in &statements {
             if let Statement::Query(query_box) = statement {
-                self.analyze_select_query(query_box, query, &mut recommendations, db_type).await?;
+                self.analyze_select_query(query_box, query, &mut recommendations, db_type)
+                    .await?;
             }
         }
 
@@ -56,8 +65,14 @@ impl SqlAnalyzer {
             query: query.to_string(),
             database_type: db_type,
             recommendations,
-            security_score: if security_issues.is_empty() { 100.0 } else { 50.0 },
+            security_score: if security_issues.is_empty() {
+                100.0
+            } else {
+                50.0
+            },
             security_issues,
+            schema_snapshot: None,
+            explain_plan: None,
             execution_time_ms: execution_time,
         })
     }
@@ -70,7 +85,8 @@ impl SqlAnalyzer {
         db_type: DatabaseType,
     ) -> Result<()> {
         if let SetExpr::Select(select) = &*query_box.body {
-            self.analyze_select_statement(select, query, recommendations, db_type).await?;
+            self.analyze_select_statement(select, query, recommendations, db_type)
+                .await?;
         }
 
         Ok(())
@@ -83,16 +99,23 @@ impl SqlAnalyzer {
         recommendations: &mut Vec<Recommendation>,
         db_type: DatabaseType,
     ) -> Result<()> {
-        if select.projection.iter().any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)))
+        if select
+            .projection
+            .iter()
+            .any(|item| matches!(item, sqlparser::ast::SelectItem::Wildcard(_)))
             && select.selection.is_none()
         {
             recommendations.push(Recommendation {
                 recommendation_type: RecommendationType::QueryRewrite,
                 table: None,
                 columns: vec![],
-                description: "SELECT * without WHERE clause may return unnecessary rows".to_string(),
+                description: "SELECT * without WHERE clause may return unnecessary rows"
+                    .to_string(),
                 estimated_improvement: 0.1,
-                sql_suggestion: Some("Consider adding specific columns and WHERE clause if not all data is needed".to_string()),
+                sql_suggestion: Some(
+                    "Consider adding specific columns and WHERE clause if not all data is needed"
+                        .to_string(),
+                ),
             });
         }
 
@@ -120,24 +143,27 @@ impl SqlAnalyzer {
                     columns: vec![],
                     description: "IN subquery detected - consider using JOIN instead".to_string(),
                     estimated_improvement: 0.5,
-                    sql_suggestion: Some("Replace IN subquery with INNER JOIN for better performance".to_string()),
+                    sql_suggestion: Some(
+                        "Replace IN subquery with INNER JOIN for better performance".to_string(),
+                    ),
                 });
             }
             sqlparser::ast::Expr::BinaryOp {
                 left,
                 op: sqlparser::ast::BinaryOperator::Eq,
                 right,
-            } => {
-                if self.is_correlated_subquery(left) || self.is_correlated_subquery(right) {
-                    recommendations.push(Recommendation {
-                        recommendation_type: RecommendationType::NPlusOneQuery,
-                        table: None,
-                        columns: vec![],
-                        description: "Correlated subquery detected - consider using JOIN instead".to_string(),
-                        estimated_improvement: 0.6,
-                        sql_suggestion: Some("Correlated subqueries are often slower than JOINs".to_string()),
-                    });
-                }
+            } if self.is_correlated_subquery(left) || self.is_correlated_subquery(right) => {
+                recommendations.push(Recommendation {
+                    recommendation_type: RecommendationType::NPlusOneQuery,
+                    table: None,
+                    columns: vec![],
+                    description: "Correlated subquery detected - consider using JOIN instead"
+                        .to_string(),
+                    estimated_improvement: 0.6,
+                    sql_suggestion: Some(
+                        "Correlated subqueries are often slower than JOINs".to_string(),
+                    ),
+                });
             }
             _ => {}
         }
@@ -149,15 +175,22 @@ impl SqlAnalyzer {
         matches!(expr, sqlparser::ast::Expr::Subquery(_))
     }
 
-    async fn mysql_enhanced_analysis(&self, query: &str, recommendations: &mut Vec<Recommendation>) -> Result<()> {
+    async fn mysql_enhanced_analysis(
+        &self,
+        query: &str,
+        recommendations: &mut Vec<Recommendation>,
+    ) -> Result<()> {
         if query.to_lowercase().contains("select *") {
             recommendations.push(Recommendation {
                 recommendation_type: RecommendationType::QueryRewrite,
                 table: None,
                 columns: vec![],
-                description: "SELECT * in MySQL can be slower than explicit column lists".to_string(),
+                description: "SELECT * in MySQL can be slower than explicit column lists"
+                    .to_string(),
                 estimated_improvement: 0.2,
-                sql_suggestion: Some("Specify only the columns you need instead of SELECT *".to_string()),
+                sql_suggestion: Some(
+                    "Specify only the columns you need instead of SELECT *".to_string(),
+                ),
             });
         }
 

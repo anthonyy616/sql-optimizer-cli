@@ -1,9 +1,9 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+use crate::cli::output::OutputFormatter;
 use crate::core::analyzer::SqlAnalyzer;
 use crate::core::types::{DatabaseType, OutputFormat};
-use crate::cli::output::OutputFormatter;
 use crate::database::connection::create_connector;
 
 pub struct CommandHandler {
@@ -17,9 +17,19 @@ impl CommandHandler {
         }
     }
 
-    pub async fn handle_analyze(&self, query: &str, db_url: &str, explain: bool, output_format: OutputFormat, verbose: bool) -> Result<()> {
+    pub async fn handle_analyze(
+        &self,
+        query: &str,
+        db_url: &str,
+        explain: bool,
+        output_format: OutputFormat,
+        verbose: bool,
+    ) -> Result<()> {
         if verbose {
-            eprintln!("Connecting to database: {}", &db_url[..std::cmp::min(db_url.len(), 20)]);
+            eprintln!(
+                "Connecting to database: {}",
+                &db_url[..std::cmp::min(db_url.len(), 20)]
+            );
             eprintln!("Query: {}", query);
         }
 
@@ -28,25 +38,32 @@ impl CommandHandler {
             DatabaseType::PostgreSQL
         } else if db_url.starts_with("mysql") {
             DatabaseType::MySQL
+        } else if db_url.starts_with("sqlite")
+            || db_url.ends_with(".db")
+            || db_url.ends_with(".sqlite")
+        {
+            DatabaseType::SQLite
         } else {
-            return Err(anyhow::anyhow!("Unsupported database URL format. Must start with postgresql:// or mysql://"));
+            return Err(anyhow::anyhow!("Unsupported database URL format. Must start with postgresql://, mysql://, or sqlite://"));
         };
 
         // Create and connect to database
         let mut connector = create_connector(db_type);
         connector.connect(db_url).await?;
-        
+
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
-        
+
         // Perform analysis
-        let result = analyzer_with_db.analyze_query(query, db_type).await?;
+        let mut result = analyzer_with_db.analyze_query(query, db_type).await?;
+
+        let schema = connector.introspect_schema().await?;
+        result.schema_snapshot = Some(schema);
 
         // Show execution plan if requested
         if explain {
-            eprintln!("\n=== Execution Plan ===");
-            eprintln!("(Execution plan analysis will be implemented with actual EXPLAIN queries)");
-            eprintln!("===================\n");
+            let plan = connector.explain_query(query).await?;
+            result.explain_plan = Some(plan);
         }
 
         // Format and output results
@@ -66,6 +83,11 @@ impl CommandHandler {
             DatabaseType::PostgreSQL
         } else if db_url.starts_with("mysql") {
             DatabaseType::MySQL
+        } else if db_url.starts_with("sqlite")
+            || db_url.ends_with(".db")
+            || db_url.ends_with(".sqlite")
+        {
+            DatabaseType::SQLite
         } else {
             return Err(anyhow::anyhow!("Unsupported database URL format"));
         };
@@ -73,16 +95,19 @@ impl CommandHandler {
         // Create and connect to database
         let mut connector = create_connector(db_type);
         connector.connect(db_url).await?;
-        
+
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
 
         println!("SQL Optimizer Interactive Mode");
-        println!("Connected to: {}", &db_url[..std::cmp::min(db_url.len(), 20)]);
+        println!(
+            "Connected to: {}",
+            &db_url[..std::cmp::min(db_url.len(), 20)]
+        );
         println!("Type 'exit' to quit, 'help' for commands\n");
 
         let mut history = Vec::new();
-        
+
         // Try to load existing history
         if let Ok(file) = std::fs::read_to_string(history_file) {
             history = file.lines().map(|s| s.to_string()).collect();
@@ -111,7 +136,7 @@ impl CommandHandler {
 
             // Add to history
             history.push(query.clone());
-            
+
             // Analyze the query
             match analyzer_with_db.analyze_query(&query, db_type).await {
                 Ok(result) => {
@@ -126,8 +151,14 @@ impl CommandHandler {
         }
 
         // Save history
-        if let Ok(mut file) = OpenOptions::new().create(true).write(true).truncate(true).open(history_file) {
-            for line in history.iter().rev().take(100) { // Keep last 100 queries
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(history_file)
+        {
+            for line in history.iter().rev().take(100) {
+                // Keep last 100 queries
                 writeln!(file, "{}", line)?;
             }
         }
@@ -135,16 +166,26 @@ impl CommandHandler {
         Ok(())
     }
 
-    pub async fn handle_batch(&self, input_file: &PathBuf, output_file: &PathBuf, db_url: &str) -> Result<()> {
+    pub async fn handle_batch(
+        &self,
+        input_file: &PathBuf,
+        output_file: &PathBuf,
+        db_url: &str,
+    ) -> Result<()> {
         use std::fs;
 
         println!("Processing batch file: {:?}", input_file);
-        
+
         // Determine database type
         let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
             DatabaseType::PostgreSQL
         } else if db_url.starts_with("mysql") {
             DatabaseType::MySQL
+        } else if db_url.starts_with("sqlite")
+            || db_url.ends_with(".db")
+            || db_url.ends_with(".sqlite")
+        {
+            DatabaseType::SQLite
         } else {
             return Err(anyhow::anyhow!("Unsupported database URL format"));
         };
@@ -152,22 +193,23 @@ impl CommandHandler {
         // Create and connect to database
         let mut connector = create_connector(db_type);
         connector.connect(db_url).await?;
-        
+
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
-        
+
         let content = fs::read_to_string(input_file)?;
-        let queries: Vec<&str> = content.lines()
+        let queries: Vec<&str> = content
+            .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
             .collect();
 
         println!("Found {} queries to analyze", queries.len());
 
         let mut results = Vec::new();
-        
+
         for (i, query) in queries.iter().enumerate() {
             println!("Analyzing query {}/{}", i + 1, queries.len());
-            
+
             match analyzer_with_db.analyze_query(query, db_type).await {
                 Ok(result) => results.push(result),
                 Err(e) => eprintln!("Error analyzing query {}: {}", i + 1, e),
@@ -178,7 +220,16 @@ impl CommandHandler {
         let json_output = serde_json::to_string_pretty(&results)?;
         fs::write(output_file, json_output)?;
 
-        println!("Batch analysis complete. Results written to: {:?}", output_file);
+        println!(
+            "Batch analysis complete. Results written to: {:?}",
+            output_file
+        );
         Ok(())
+    }
+}
+
+impl Default for CommandHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }

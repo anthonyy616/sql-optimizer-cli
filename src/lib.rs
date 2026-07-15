@@ -2,8 +2,8 @@ pub mod cli;
 pub mod core;
 pub mod database;
 pub mod patterns;
-pub mod security;
 pub mod rewriting;
+pub mod security;
 pub mod utils;
 
 use anyhow::Result;

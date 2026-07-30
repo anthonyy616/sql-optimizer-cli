@@ -1,5 +1,5 @@
-use sha2::{Digest, Sha256};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
 /// Canonicalize a SQL query by removing literal values and normalizing whitespace/casing.
 pub fn canonicalize_query(query: &str) -> String {
@@ -14,7 +14,8 @@ pub fn canonicalize_query(query: &str) -> String {
 
     // Normalize whitespace and casing
     let ws = Regex::new(r"\s+").unwrap();
-    let normalized = ws.replace_all(&without_numbers.to_lowercase(), " ");
+    let lowered = without_numbers.to_lowercase();
+    let normalized = ws.replace_all(&lowered, " ");
     normalized.trim().to_string()
 }
 

@@ -86,7 +86,7 @@ impl DatabaseConnector for MySqlConnector {
         })?;
 
         let db_name = opts
-            .get_db_name()
+            .db_name()
             .map(ToString::to_string)
             .ok_or_else(|| anyhow!("MySQL connection URL must include a database name"))?;
 

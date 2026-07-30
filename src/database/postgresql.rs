@@ -81,41 +81,54 @@ impl DatabaseConnector for PostgresConnector {
             .parse()
             .with_context(|| "Invalid PostgreSQL connection string")?;
 
+        // Try connecting, but don't hang forever — cloud serverless Postgres (Neon) may cold-start.
+        // Use a timeout so callers can surface a helpful message instead of appearing hung.
         let ssl_mode = config.get_ssl_mode();
 
-        if ssl_mode == SslMode::Require {
-            let tls = native_tls::TlsConnector::builder()
-                .build()
-                .with_context(|| "Failed to build TLS connector")?;
-            let tls_connector = postgres_native_tls::MakeTlsConnector::new(tls);
-            let (client, connection) = config
-                .connect(tls_connector)
-                .await
-                .with_context(|| "Failed to connect to PostgreSQL with TLS")?;
+        let connect_fut = async {
+            if ssl_mode == SslMode::Require {
+                let tls = native_tls::TlsConnector::builder()
+                    .build()
+                    .with_context(|| "Failed to build TLS connector")?;
+                let tls_connector = postgres_native_tls::MakeTlsConnector::new(tls);
+                let (client, connection) = config
+                    .connect(tls_connector)
+                    .await
+                    .with_context(|| "Failed to connect to PostgreSQL with TLS")?;
 
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    eprintln!("PostgreSQL connection error: {e}");
-                }
-            });
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("PostgreSQL connection error: {e}");
+                    }
+                });
 
-            self.client = Some(client);
-            return Ok(());
-        }
+                Ok(client)
+            } else {
+                let (client, connection) = config
+                    .connect(NoTls)
+                    .await
+                    .with_context(|| "Failed to connect to PostgreSQL")?;
 
-        let (client, connection) = config
-            .connect(NoTls)
-            .await
-            .with_context(|| "Failed to connect to PostgreSQL")?;
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        eprintln!("PostgreSQL connection error: {e}");
+                    }
+                });
 
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("PostgreSQL connection error: {e}");
+                Ok(client)
             }
-        });
+        };
 
-        self.client = Some(client);
-        Ok(())
+        // If connection takes longer than this, surface helpful guidance (Neon cold-starts can be slow).
+        use tokio::time::{timeout, Duration};
+        match timeout(Duration::from_secs(25), connect_fut).await {
+            Ok(Ok(client)) => {
+                self.client = Some(client);
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow!("PostgreSQL connection timed out (possible Neon cold-start). Try again with --verbose to see more details or increase the connection timeout).")),
+        }
     }
 
     async fn disconnect(&mut self) -> Result<()> {

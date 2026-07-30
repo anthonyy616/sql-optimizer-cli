@@ -211,11 +211,51 @@ impl DatabaseConnector for MySqlConnector {
             }
             let indexes = indexes_map.into_values().collect::<Vec<_>>();
 
+            // Fetch foreign keys from information_schema.key_column_usage
+            let fk_rows: Vec<(String, String, String, String, u64)> = conn
+                .exec_map(
+                    "
+                    SELECT constraint_name, column_name, referenced_table_name, referenced_column_name, ordinal_position
+                    FROM information_schema.key_column_usage
+                    WHERE table_schema = ? AND table_name = ? AND referenced_table_name IS NOT NULL
+                    ORDER BY constraint_name, ordinal_position
+                    ",
+                    (db_name.clone(), table_name.clone()),
+                    |(constraint_name, column_name, ref_table, ref_column, ordinal_position)| {
+                        (constraint_name, column_name, ref_table, ref_column, ordinal_position)
+                    },
+                )
+                .await
+                .with_context(|| format!("Failed to read foreign keys for table '{table_name}'"))?;
+
+            use std::collections::BTreeMap;
+            let mut fk_map: BTreeMap<String, (String, Vec<(u64, String)>, Vec<(u64, String)>)> =
+                BTreeMap::new();
+            for (cname, col, ref_table, ref_col, pos) in fk_rows {
+                let entry = fk_map
+                    .entry(cname.clone())
+                    .or_insert_with(|| (ref_table.clone(), Vec::new(), Vec::new()));
+                entry.1.push((pos, col));
+                entry.2.push((pos, ref_col));
+            }
+
+            let mut foreign_keys = Vec::new();
+            for (cname, (ref_table, mut cols, mut ref_cols)) in fk_map.into_iter() {
+                cols.sort_by_key(|(p, _)| *p);
+                ref_cols.sort_by_key(|(p, _)| *p);
+                foreign_keys.push(crate::core::types::ForeignKeyInfo {
+                    name: cname,
+                    columns: cols.into_iter().map(|(_, c)| c).collect(),
+                    referenced_table: ref_table,
+                    referenced_columns: ref_cols.into_iter().map(|(_, c)| c).collect(),
+                });
+            }
+
             tables.push(TableSchema {
                 name: table_name,
                 columns,
                 indexes,
-                foreign_keys: Vec::new(),
+                foreign_keys,
             });
         }
 

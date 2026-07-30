@@ -208,11 +208,61 @@ impl DatabaseConnector for PostgresConnector {
                 })
                 .collect::<Vec<_>>();
 
+            // Fetch foreign keys for this table
+            let fk_rows = client
+                .query(
+                    "
+                    SELECT
+                        kcu.constraint_name,
+                        kcu.column_name,
+                        ccu.table_name AS foreign_table_name,
+                        ccu.column_name AS foreign_column_name,
+                        kcu.ordinal_position
+                    FROM information_schema.key_column_usage kcu
+                    JOIN information_schema.constraint_column_usage ccu
+                        ON kcu.constraint_name = ccu.constraint_name
+                        AND kcu.table_schema = ccu.constraint_schema
+                    WHERE kcu.table_schema = 'public' AND kcu.table_name = $1
+                    ORDER BY kcu.constraint_name, kcu.ordinal_position
+                    ",
+                    &[&table_name],
+                )
+                .await
+                .with_context(|| format!("Failed to read foreign keys for table '{table_name}'"))?;
+
+            use std::collections::BTreeMap;
+            let mut fk_map: BTreeMap<String, (String, Vec<(i32, String)>, Vec<(i32, String)>)> =
+                BTreeMap::new();
+            for row in fk_rows {
+                let cname: String = row.get("constraint_name");
+                let col: String = row.get("column_name");
+                let ftable: String = row.get("foreign_table_name");
+                let fcol: String = row.get("foreign_column_name");
+                let pos: i32 = row.get("ordinal_position");
+                let entry = fk_map
+                    .entry(cname.clone())
+                    .or_insert_with(|| (ftable.clone(), Vec::new(), Vec::new()));
+                entry.1.push((pos, col));
+                entry.2.push((pos, fcol));
+            }
+
+            let mut foreign_keys = Vec::new();
+            for (cname, (ftable, mut cols, mut fcols)) in fk_map.into_iter() {
+                cols.sort_by_key(|(p, _)| *p);
+                fcols.sort_by_key(|(p, _)| *p);
+                foreign_keys.push(crate::core::types::ForeignKeyInfo {
+                    name: cname,
+                    columns: cols.into_iter().map(|(_, c)| c).collect(),
+                    referenced_table: ftable,
+                    referenced_columns: fcols.into_iter().map(|(_, c)| c).collect(),
+                });
+            }
+
             tables.push(TableSchema {
                 name: table_name,
                 columns,
                 indexes,
-                foreign_keys: Vec::new(),
+                foreign_keys,
             });
         }
 

@@ -60,6 +60,10 @@ impl CommandHandler {
         let schema = connector.introspect_schema().await?;
         result.schema_snapshot = Some(schema);
 
+        // Run schema-dependent checks (missing index, etc.)
+        let analyzer = crate::core::analyzer::SqlAnalyzer::new();
+        analyzer.run_schema_checks(&mut result).await?;
+
         // Show execution plan if requested
         if explain {
             let plan = connector.explain_query(query).await?;

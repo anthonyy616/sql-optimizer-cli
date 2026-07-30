@@ -101,7 +101,8 @@ impl OutputFormatter {
                 }
             }
             // Plain-English summary
-            if let Some(summary) = crate::core::explain::plain_explain_summary(&result.explain_plan) {
+            if let Some(summary) = crate::core::explain::plain_explain_summary(&result.explain_plan)
+            {
                 println!("\nEXPLAIN SUMMARY: {}", summary);
             }
         }

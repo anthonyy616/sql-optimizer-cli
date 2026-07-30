@@ -177,11 +177,51 @@ impl DatabaseConnector for SqliteConnector {
                     });
                 }
 
+                // Collect foreign keys via PRAGMA foreign_key_list
+                let mut fk_stmt =
+                    conn.prepare(&format!("PRAGMA foreign_key_list('{table_name}')"))?;
+                let fk_rows = fk_stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                use std::collections::BTreeMap;
+                let mut fk_map: BTreeMap<i64, (String, Vec<(i64, String)>, Vec<(i64, String)>)> =
+                    BTreeMap::new();
+                for (id, seq, ref_table, from_col, to_col) in fk_rows {
+                    let entry = fk_map
+                        .entry(id)
+                        .or_insert_with(|| (ref_table.clone(), Vec::new(), Vec::new()));
+                    entry.1.push((seq, from_col.clone()));
+                    entry.2.push((seq, to_col.clone()));
+                }
+
+                let mut foreign_keys = Vec::new();
+                for (id, (ref_table, cols, ref_cols)) in fk_map.into_iter() {
+                    let mut cols_sorted = cols;
+                    cols_sorted.sort_by_key(|(s, _)| *s);
+                    let mut ref_cols_sorted = ref_cols;
+                    ref_cols_sorted.sort_by_key(|(s, _)| *s);
+                    foreign_keys.push(crate::core::types::ForeignKeyInfo {
+                        name: format!("fk_{}_{}", table_name, id),
+                        columns: cols_sorted.into_iter().map(|(_, c)| c).collect(),
+                        referenced_table: ref_table,
+                        referenced_columns: ref_cols_sorted.into_iter().map(|(_, c)| c).collect(),
+                    });
+                }
+
                 tables.push(TableSchema {
                     name: table_name,
                     columns,
                     indexes,
-                    foreign_keys: Vec::new(),
+                    foreign_keys,
                 });
             }
 

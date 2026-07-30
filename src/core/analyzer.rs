@@ -77,6 +77,17 @@ impl SqlAnalyzer {
         })
     }
 
+    pub async fn run_schema_checks(&self, result: &mut AnalysisResult) -> Result<()> {
+        if let Some(schema) = &result.schema_snapshot {
+            // call missing index detector
+            let mut recs =
+                crate::patterns::missing_index::detect_missing_index(&result.query, schema);
+            result.recommendations.append(&mut recs);
+        }
+
+        Ok(())
+    }
+
     async fn analyze_select_query(
         &self,
         query_box: &Query,

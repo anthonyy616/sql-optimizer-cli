@@ -6,7 +6,7 @@ pub fn plain_explain_summary(plan: &Option<QueryPlan>) -> Option<String> {
 
     // Simple heuristic summary based on node type, rows, and index usage
     let mut parts = Vec::new();
-    parts.push(format!("{}", root.node_type));
+    parts.push(root.node_type.clone());
     if let Some(rows) = root.rows {
         parts.push(format!("~{} rows", rows as i64));
     }

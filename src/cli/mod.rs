@@ -65,6 +65,12 @@ pub enum Commands {
         #[arg(short, long)]
         output: std::path::PathBuf,
     },
+    /// Introspect and print database schema
+    Schema {
+        /// Database connection string
+        #[arg(short, long)]
+        db: String,
+    },
 }
 
 impl Cli {
@@ -88,6 +94,7 @@ impl Cli {
                 output: _,
             } => handler.handle_interactive(history, db).await,
             Commands::Batch { db, input, output } => handler.handle_batch(input, output, db).await,
+            Commands::Schema { db } => handler.handle_schema(db).await,
         }
     }
 }

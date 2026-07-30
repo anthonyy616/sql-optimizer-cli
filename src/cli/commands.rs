@@ -226,6 +226,40 @@ impl CommandHandler {
         );
         Ok(())
     }
+
+    pub async fn handle_schema(&self, db_url: &str) -> Result<()> {
+        // Determine database type from URL
+        let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
+            DatabaseType::PostgreSQL
+        } else if db_url.starts_with("mysql") {
+            DatabaseType::MySQL
+        } else if db_url.starts_with("sqlite")
+            || db_url.ends_with(".db")
+            || db_url.ends_with(".sqlite")
+        {
+            DatabaseType::SQLite
+        } else {
+            return Err(anyhow::anyhow!("Unsupported database URL format. Must start with postgresql://, mysql://, or sqlite://"));
+        };
+
+        let mut connector = create_connector(db_type);
+        connector.connect(db_url).await?;
+
+        let schema = connector.introspect_schema().await?;
+
+        println!("Schema snapshot (tables={}):", schema.tables.len());
+        for table in schema.tables.iter() {
+            println!("- {}", table.name);
+            for col in &table.columns {
+                println!("  - {} : {}", col.name, col.data_type);
+            }
+            for idx in &table.indexes {
+                println!("  [idx] {} ({})", idx.name, idx.columns.join(", "));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for CommandHandler {

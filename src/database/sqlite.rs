@@ -181,6 +181,7 @@ impl DatabaseConnector for SqliteConnector {
                     name: table_name,
                     columns,
                     indexes,
+                    foreign_keys: Vec::new(),
                 });
             }
 

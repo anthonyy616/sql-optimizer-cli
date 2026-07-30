@@ -215,6 +215,7 @@ impl DatabaseConnector for MySqlConnector {
                 name: table_name,
                 columns,
                 indexes,
+                foreign_keys: Vec::new(),
             });
         }
 

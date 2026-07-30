@@ -212,6 +212,7 @@ impl DatabaseConnector for PostgresConnector {
                 name: table_name,
                 columns,
                 indexes,
+                foreign_keys: Vec::new(),
             });
         }
 

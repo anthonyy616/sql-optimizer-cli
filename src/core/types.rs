@@ -18,6 +18,7 @@ pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -31,6 +32,14 @@ pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
     pub is_unique: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

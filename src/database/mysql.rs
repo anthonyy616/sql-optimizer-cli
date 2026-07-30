@@ -22,6 +22,7 @@ impl MySqlConnector {
         }
     }
 
+    #[allow(dead_code)]
     fn parse_index_columns(index_def: &str) -> Vec<String> {
         let re = Regex::new(r"\((?P<cols>[^\)]+)\)").expect("valid mysql index regex");
         let cols = re

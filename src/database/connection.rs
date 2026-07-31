@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::core::types::{DatabaseType, QueryPlan, SchemaSnapshot};
+use crate::core::types::{DatabaseType, QueryPlan, RowPreview, SchemaSnapshot};
 
 pub fn create_connector(db_type: DatabaseType) -> Box<dyn DatabaseConnector> {
     match db_type {
@@ -22,5 +22,6 @@ pub trait DatabaseConnector: Send + Sync {
     async fn test_connection(&self) -> Result<bool>;
     async fn introspect_schema(&self) -> Result<SchemaSnapshot>;
     async fn explain_query(&self, query: &str) -> Result<QueryPlan>;
+    async fn preview_rows(&self, query: &str, limit: usize) -> Result<RowPreview>;
     fn database_type(&self) -> crate::core::types::DatabaseType;
 }

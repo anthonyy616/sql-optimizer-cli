@@ -1,16 +1,18 @@
 # SQL Optimization CLI
 
-A command-line tool that analyzes SQL queries and provides optimization recommendations for PostgreSQL and MySQL databases.
+A command-line tool that analyzes SQL queries and provides optimization recommendations for PostgreSQL, MySQL, and SQLite databases.
 
 ## Features
 
 - Parse and analyze SQL queries for performance anti-patterns
-- Detect N+1 query patterns, Cartesian products, and inefficient JOINs
-- Suggest index creation opportunities
+- Detect N+1 query patterns, Cartesian products, inefficient JOINs, and missing indexes
+- Show execution plans when requested
 - Identify security vulnerabilities and injection risks
-- Support for PostgreSQL and MySQL databases
+- Support for PostgreSQL, MySQL, and SQLite databases
 - Interactive and batch processing modes
 - Query rewriting suggestions
+- Text, JSON, YAML, and Markdown output
+- Database schema introspection
 
 ## Installation
 
@@ -18,16 +20,17 @@ A command-line tool that analyzes SQL queries and provides optimization recommen
 ```bash
 cargo install --path . --locked
 ```
-From Source
+
+### From Source
 ```bash
 git clone https://github.com/anthonyy616/sql-optimizer-cli.git
 cd sql-optimizer-cli
 ./scripts/install.sh
 ```
 
-After installation, the main binary is available on your PATH as `sql-optimizer-cli`, and the
-install step also creates shortcut commands named `analyze`, `batch`, `interactive`, and
-`schema` in your Cargo bin directory. During local development, use `cargo run -- analyze ...`
+After installation, the main binary is available on your PATH as `sql-optimizer-cli`. The install
+script also creates shortcut commands named `analyze`, `batch`, `interactive`, and `schema` in
+your Cargo bin directory. During local development, use `cargo run --bin sql-optimizer-cli -- ...`
 instead of invoking the binary from `./target/debug`.
 
 Database connections are created per command run. `analyze`, `batch`, and `schema` open a fresh
@@ -36,11 +39,11 @@ the lifetime of that interactive session only.
 
 ### Quick Start
 
-The CLI now supports two connection styles:
+The CLI supports two connection styles:
 
 1. Pass a full connection URL with `--db`.
 2. Set `SQL_OPTIMIZER_DB_*` values in a `.env` file and run the command without typing the
-  password inline.
+   password inline.
 
 Example `.env` values:
 
@@ -153,65 +156,170 @@ sql-optimizer-cli analyze "$1" \
   --simple-mode
 ```
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
+  For Supabase, prefer the session pooler connection string for short-lived CLI runs. If your
+  environment is IPv4-only or your database hostname is not reachable over IPv6, use the IPv4
+  endpoint instead of a hostname that resolves only on IPv6. When connecting through a pooler,
+  add `--simple-mode` so the client avoids prepared statements.
 sql-optimizer-cli batch \
   --input queries.sql \
   --output recommendations.json \
   --db "${SQL_OPTIMIZER_DB_URL}" \
-  --simple-mode
+  cargo run --bin sql-optimizer-cli -- schema --db "$SQL_OPTIMIZER_DB_URL"
 ```
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-sql-optimizer-cli interactive \
+  cargo run --bin sql-optimizer-cli -- schema --accept-invalid-certs
   --db "${SQL_OPTIMIZER_DB_URL}" \
   --simple-mode
-```
+  ## Command Reference
 
-```bash
+  ### Shared Flags
+
+  These flags are accepted by every subcommand because they come from the shared `ConnectionArgs`
+  structure or the top-level CLI.
+
+  | Flag | Description |
+  | --- | --- |
+  | `-v`, `--verbose` | Print extra progress details before running the command. |
+  | `-d`, `--db <URL>` | Full database connection string. If this is set, the individual connection parts are ignored. |
+  | `--db-host <HOST>` | Hostname used when building a connection string from parts. |
+  | `--db-port <PORT>` | Port used when building a connection string from parts. |
+  | `--db-user <USER>` | Username used when building a connection string from parts. |
+  | `--db-password <PASSWORD>` | Password used when building a connection string from parts. |
+  | `--db-name <NAME>` | Database name used when building a connection string from parts. |
+  | `--db-sslmode <MODE>` | PostgreSQL SSL mode used when building a connection string from parts. Defaults to `require`. |
+  | `--accept-invalid-certs` | Allow self-signed or otherwise invalid certificates when connecting to PostgreSQL. |
+
+  ### `analyze`
+
+  Analyze a single SQL query.
+
+  Syntax:
+
+  ```bash
+  sql-optimizer-cli analyze <QUERY> [shared flags] [--explain] [--output <FORMAT>] [--simple-mode] [--connect-timeout <SECONDS>]
+  ```
+
+  | Flag | Description |
+  | --- | --- |
+  | `QUERY` | Required SQL statement to analyze. |
+  | `--explain` | Include an execution plan in the output. |
+  | `-o`, `--output <FORMAT>` | Output format. Valid values are `text`, `json`, `yaml`, and `markdown`. Defaults to `text`. |
+  | `--simple-mode` | Force simple queries and avoid prepared statements. Useful for PgBouncer transaction pooling. |
+  | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
+
+  Example:
+
+  ```bash
+  sql-optimizer-cli analyze "SELECT u.*, o.total FROM users u JOIN orders o ON u.id = o.user_id" \
+    --db postgresql://user:password@localhost:5432/mydb \
+    --explain \
+    --output markdown \
+    --simple-mode
+  ```
+
+  ### `interactive`
+
+  Start an interactive session that keeps the connection open while you enter queries.
+
+  Syntax:
+
+  ```bash
+  sql-optimizer-cli interactive [shared flags] [--history <PATH>] [--output <FORMAT>] [--simple-mode] [--connect-timeout <SECONDS>]
+  ```
+
+  | Flag | Description |
+  | --- | --- |
+  | `--history <PATH>` | History file path. Defaults to `~/.sql-optimizer-history`. |
+  | `-o`, `--output <FORMAT>` | Output format. Valid values are `text`, `json`, `yaml`, and `markdown`. Defaults to `text`. |
+  | `--simple-mode` | Force simple queries and avoid prepared statements. |
+  | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
+
+  Example:
+
+  ```bash
+  sql-optimizer-cli interactive --db postgresql://user:password@localhost:5432/mydb --history ~/.sql-optimizer-history
+  ```
+
+  ### `batch`
+
+  Process multiple queries from a file and write the results to a file.
+
+  Syntax:
+
+  ```bash
+  sql-optimizer-cli batch --input <FILE> --output <FILE> [shared flags] [--simple-mode] [--connect-timeout <SECONDS>]
+  ```
+
+  | Flag | Description |
+  | --- | --- |
+  | `-i`, `--input <FILE>` | Input file containing SQL queries. |
+  | `-o`, `--output <FILE>` | Output file for the JSON recommendations. |
+  | `--simple-mode` | Force simple queries and avoid prepared statements. |
+  | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
+
+  Example:
+
+  ```bash
+  sql-optimizer-cli batch --input queries.sql --output recommendations.json --db mysql://user:password@localhost:3306/mydb
+  ```
+
+  ### `schema`
+
+  Connect to a database and print the introspected schema.
+
+  Syntax:
+
+  ```bash
+  sql-optimizer-cli schema [shared flags] [--simple-mode] [--connect-timeout <SECONDS>]
+  ```
+
+  | Flag | Description |
+  | --- | --- |
+  | `--simple-mode` | Force simple queries and avoid prepared statements. |
+  | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
+
+  Example:
+
+  ```bash
+  sql-optimizer-cli schema --db sqlite::memory:
+  ```
+
+  ## Notes
+
+  The current CLI does not expose `--show-rows`, `--row-limit`, or `--output-file` as separate
+  flags. Batch output is controlled with `--output`, and row previews are represented in the result
+  model rather than toggled by CLI flags.
+
+  ## Connection Strings
 #!/usr/bin/env bash
-set -euo pipefail
-
-sql-optimizer-cli schema \
-  --db "${SQL_OPTIMIZER_DB_URL}" \
-  --simple-mode
-```
-
-## Output Examples
-### Text Output
-
-```bash
-SQL Analysis Results
-===================
-Query: SELECT * FROM users WHERE email = 'test@example.com'
-Database: PostgreSQL 14.2
-Analysis Time: 0.8s
-
-OPTIMIZATION OPPORTUNITIES:
-- Missing Index: CREATE INDEX idx_users_email ON users(email)
-  Estimated improvement: 73% faster
-
-SECURITY ANALYSIS:
-- No security issues detected
-```
-
-### JSON Output
-```json
-{
-  "query": "SELECT * FROM users WHERE email = 'test@example.com'",
+  The tool supports standard connection strings for PostgreSQL, MySQL, and SQLite:
   "database": "postgresql",
-  "recommendations": [
+  ```bash
+  PostgreSQL: postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
+  MySQL: mysql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
+  SQLite: sqlite::memory: or sqlite:///path/to/local.db
+  ```
+
+  For Supabase and similar hosted Postgres services, the session pooler URL is usually the best
+  fit for this CLI's short-lived connections. If your setup needs IPv4, use the IPv4 endpoint or
+  direct host that your network can actually reach.
+
+  When using `.env`, place the file in the directory you run the CLI from. The CLI reads
+  environment values automatically at startup.
+
+  ## Reusable Query Scripts
+
+  Save these as shell scripts if you want a repeatable way to run the CLI with your env vars:
     {
       "type": "missing_index",
       "table": "users",
       "columns": ["email"],
       "estimated_improvement": 0.73
-    }
+  sql-optimizer-cli analyze "$1" \
   ],
   "security": {
     "score": 100,
@@ -221,10 +329,12 @@ SECURITY ANALYSIS:
 ```
 
 ## Development
+
 ### Building
 ```bash
 cargo build
 ```
+
 ## Running Tests
 ```bash
 cargo test

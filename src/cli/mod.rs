@@ -248,12 +248,7 @@ impl Cli {
                 connect_timeout,
             } => {
                 handler
-                    .handle_interactive(
-                        history,
-                        connection,
-                        *simple_mode,
-                        *connect_timeout,
-                    )
+                    .handle_interactive(history, connection, *simple_mode, *connect_timeout)
                     .await
             }
             Commands::Batch {
@@ -264,13 +259,7 @@ impl Cli {
                 connect_timeout,
             } => {
                 handler
-                    .handle_batch(
-                        input,
-                        output,
-                        connection,
-                        *simple_mode,
-                        *connect_timeout,
-                    )
+                    .handle_batch(input, output, connection, *simple_mode, *connect_timeout)
                     .await
             }
             Commands::Schema {
@@ -279,11 +268,7 @@ impl Cli {
                 connect_timeout,
             } => {
                 handler
-                    .handle_schema(
-                        connection,
-                        *simple_mode,
-                        *connect_timeout,
-                    )
+                    .handle_schema(connection, *simple_mode, *connect_timeout)
                     .await
             }
         }

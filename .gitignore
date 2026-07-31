@@ -109,3 +109,4 @@ clippy.toml
 .agent/
 personal/
 
+output/

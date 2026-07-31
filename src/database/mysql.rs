@@ -5,9 +5,11 @@ use mysql_async::{Opts, Pool};
 use regex::Regex;
 
 use crate::core::types::{
-    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, SchemaSnapshot, TableSchema,
+    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, RowPreview, SchemaSnapshot,
+    TableSchema,
 };
 use crate::database::connection::DatabaseConnector;
+use crate::utils::parser::{ensure_read_only_select, preview_sql};
 
 pub struct MySqlConnector {
     pool: Option<Pool>,
@@ -309,7 +311,83 @@ impl DatabaseConnector for MySqlConnector {
         })
     }
 
+    async fn preview_rows(&self, query: &str, limit: usize) -> Result<RowPreview> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("MySQL pool is not initialized"))?;
+
+        ensure_read_only_select(query, DatabaseType::MySQL)?;
+
+        let preview_sql = preview_sql(query, limit);
+        let mut conn = pool
+            .get_conn()
+            .await
+            .with_context(|| "Failed to get MySQL connection for row preview")?;
+
+        let mut result = conn
+            .query_iter(preview_sql)
+            .await
+            .with_context(|| "Failed to run MySQL row preview")?;
+
+        let rows = result
+            .collect::<mysql_async::Row>()
+            .await
+            .with_context(|| "Failed to collect MySQL preview rows")?;
+
+        let columns = rows
+            .first()
+            .map(|row| {
+                row.columns_ref()
+                    .iter()
+                    .map(|column| column.name_str().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                row.unwrap()
+                    .into_iter()
+                    .map(|value| format_mysql_value(&value))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(RowPreview {
+            columns,
+            truncated: rows.len() >= limit,
+            rows,
+            limit,
+        })
+    }
+
     fn database_type(&self) -> DatabaseType {
         DatabaseType::MySQL
+    }
+}
+
+fn format_mysql_value(value: &mysql_async::Value) -> String {
+    match value {
+        mysql_async::Value::NULL => String::new(),
+        mysql_async::Value::Bytes(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        mysql_async::Value::Int(value) => value.to_string(),
+        mysql_async::Value::UInt(value) => value.to_string(),
+        mysql_async::Value::Float(value) => value.to_string(),
+        mysql_async::Value::Double(value) => value.to_string(),
+        mysql_async::Value::Date(year, month, day, hour, minute, second, micros) => format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{:06}",
+            micros
+        ),
+        mysql_async::Value::Time(is_neg, days, hours, minutes, seconds, micros) => format!(
+            "{}{} {:02}:{:02}:{:02}.{:06}",
+            if *is_neg { "-" } else { "" },
+            days,
+            hours,
+            minutes,
+            seconds,
+            micros
+        ),
     }
 }

@@ -5,9 +5,11 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, NoTls};
 
 use crate::core::types::{
-    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, SchemaSnapshot, TableSchema,
+    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, RowPreview, SchemaSnapshot,
+    TableSchema,
 };
 use crate::database::connection::DatabaseConnector;
+use crate::utils::parser::{ensure_read_only_select, preview_sql};
 
 pub struct PostgresConnector {
     client: Option<Client>,
@@ -362,7 +364,72 @@ impl DatabaseConnector for PostgresConnector {
         })
     }
 
+    async fn preview_rows(&self, query: &str, limit: usize) -> Result<RowPreview> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
+
+        ensure_read_only_select(query, DatabaseType::PostgreSQL)?;
+
+        let preview_sql = preview_sql(query, limit);
+        let statement = client
+            .prepare(&preview_sql)
+            .await
+            .with_context(|| "Failed to prepare PostgreSQL row preview query")?;
+        let columns = statement
+            .columns()
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect::<Vec<_>>();
+
+        let rows = client
+            .query(&statement, &[])
+            .await
+            .with_context(|| "Failed to fetch PostgreSQL row preview")?;
+
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                (0..row.len())
+                    .map(|idx| stringify_postgres_cell(&row, idx))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        Ok(RowPreview {
+            columns,
+            truncated: rows.len() >= limit,
+            rows,
+            limit,
+        })
+    }
+
     fn database_type(&self) -> DatabaseType {
         DatabaseType::PostgreSQL
     }
+}
+
+fn stringify_postgres_cell(row: &tokio_postgres::Row, idx: usize) -> String {
+    macro_rules! try_value {
+        ($ty:ty) => {
+            if let Ok(Some(value)) = row.try_get::<usize, Option<$ty>>(idx) {
+                return value.to_string();
+            }
+        };
+    }
+
+    try_value!(String);
+    try_value!(i64);
+    try_value!(i32);
+    try_value!(i16);
+    try_value!(f64);
+    try_value!(f32);
+    try_value!(bool);
+
+    if let Ok(Some(value)) = row.try_get::<usize, Option<serde_json::Value>>(idx) {
+        return value.to_string();
+    }
+
+    "<unprintable>".to_string()
 }

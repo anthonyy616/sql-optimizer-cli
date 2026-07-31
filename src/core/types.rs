@@ -58,12 +58,21 @@ pub struct QueryPlanNode {
     pub children: Vec<QueryPlanNode>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RowPreview {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub truncated: bool,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ValueEnum, Default)]
 pub enum OutputFormat {
     #[default]
     Text,
     Json,
     Yaml,
+    Markdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +84,7 @@ pub struct AnalysisResult {
     pub security_issues: Vec<SecurityIssue>,
     pub schema_snapshot: Option<SchemaSnapshot>,
     pub explain_plan: Option<QueryPlan>,
+    pub row_preview: Option<RowPreview>,
     pub execution_time_ms: u64,
 }
 

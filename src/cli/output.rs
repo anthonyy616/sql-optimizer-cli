@@ -17,6 +17,7 @@ impl OutputFormatter {
             OutputFormat::Text => self.format_text(result),
             OutputFormat::Json => self.format_json(result),
             OutputFormat::Yaml => self.format_yaml(result),
+            OutputFormat::Markdown => self.format_markdown(result),
         }
     }
 
@@ -121,4 +122,95 @@ impl OutputFormatter {
         println!("{}", yaml);
         Ok(())
     }
+
+    fn format_markdown(&self, result: &AnalysisResult) -> Result<()> {
+        println!("# SQL Analysis Results");
+        println!();
+        println!("- **Query:** `{}`", escape_markdown_inline(&result.query));
+        println!("- **Database:** `{:?}`", result.database_type);
+        println!("- **Analysis Time:** {}ms", result.execution_time_ms);
+        println!();
+
+        println!("## Optimization Opportunities");
+        if result.recommendations.is_empty() {
+            println!("No optimization opportunities found.");
+        } else {
+            for (i, rec) in result.recommendations.iter().enumerate() {
+                println!("{}. {}", i + 1, rec.description);
+                if let Some(suggestion) = &rec.sql_suggestion {
+                    println!("   - Suggestion: `{}`", escape_markdown_inline(suggestion));
+                }
+                println!(
+                    "   - Estimated improvement: {:.1}%",
+                    rec.estimated_improvement * 100.0
+                );
+            }
+        }
+        println!();
+
+        println!("## Security Analysis");
+        if result.security_issues.is_empty() {
+            println!("- No security issues detected");
+        } else {
+            for issue in &result.security_issues {
+                println!("- {} (Severity: `{:?}`)", issue.description, issue.severity);
+            }
+        }
+
+        if let Some(schema) = &result.schema_snapshot {
+            println!();
+            println!("## Schema Snapshot");
+            println!("- Tables discovered: {}", schema.tables.len());
+            for table in schema.tables.iter().take(5) {
+                println!(
+                    "  - {} ({} columns, {} indexes)",
+                    table.name,
+                    table.columns.len(),
+                    table.indexes.len()
+                );
+            }
+        }
+
+        if let Some(preview) = &result.row_preview {
+            println!();
+            println!("## Row Preview");
+            println!("- Limit: {}", preview.limit);
+            println!("- Truncated: {}", preview.truncated);
+            if !preview.columns.is_empty() {
+                println!("- Columns: {}", preview.columns.join(", "));
+            }
+            for row in preview.rows.iter().take(5) {
+                println!("  - {}", row.join(" | "));
+            }
+        }
+
+        if let Some(plan) = &result.explain_plan {
+            println!();
+            println!("## Explain Plan");
+            println!("- Engine: `{}`", plan.engine);
+            if let Some(root) = &plan.root {
+                println!("- Root node: `{}`", root.node_type);
+                if let Some(rows) = root.rows {
+                    println!("- Estimated rows: {}", rows);
+                }
+                if let Some(cost) = root.cost {
+                    println!("- Estimated cost: {}", cost);
+                }
+                if let Some(index) = &root.index_used {
+                    println!("- Index used: `{}`", escape_markdown_inline(index));
+                }
+            }
+            if let Some(summary) = crate::core::explain::plain_explain_summary(&result.explain_plan)
+            {
+                println!();
+                println!("**Explain Summary:** {}", summary);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn escape_markdown_inline(input: &str) -> String {
+    input.replace('`', "\\`")
 }

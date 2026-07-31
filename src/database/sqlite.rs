@@ -1,12 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use regex::Regex;
-use rusqlite::Connection;
+use rusqlite::{types::ValueRef, Connection};
 
 use crate::core::types::{
-    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, SchemaSnapshot, TableSchema,
+    ColumnInfo, DatabaseType, IndexInfo, QueryPlan, QueryPlanNode, RowPreview, SchemaSnapshot,
+    TableSchema,
 };
 use crate::database::connection::DatabaseConnector;
+use crate::utils::parser::{ensure_read_only_select, preview_sql};
 
 pub struct SqliteConnector {
     db_path: Option<String>,
@@ -181,7 +183,6 @@ impl DatabaseConnector for SqliteConnector {
                     });
                 }
 
-                // Collect foreign keys via PRAGMA foreign_key_list
                 let mut fk_stmt =
                     conn.prepare(&format!("PRAGMA foreign_key_list('{table_name}')"))?;
                 let fk_rows = fk_stmt
@@ -266,7 +267,57 @@ impl DatabaseConnector for SqliteConnector {
         .with_context(|| "SQLite explain task failed")?
     }
 
+    async fn preview_rows(&self, query: &str, limit: usize) -> Result<RowPreview> {
+        let path = self
+            .db_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("SQLite connection is not initialized"))?
+            .to_string();
+
+        ensure_read_only_select(query, DatabaseType::SQLite)?;
+
+        let preview_sql = preview_sql(query, limit);
+
+        tokio::task::spawn_blocking(move || -> Result<RowPreview> {
+            let conn = Self::open_connection(&path)?;
+            let mut stmt = conn.prepare(&preview_sql)?;
+            let columns = stmt
+                .column_names()
+                .into_iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>();
+            let rows = stmt
+                .query_map([], |row| {
+                    let mut values = Vec::new();
+                    for idx in 0..row.as_ref().column_count() {
+                        values.push(sqlite_value_to_string(row.get_ref(idx)?));
+                    }
+                    Ok(values)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            Ok(RowPreview {
+                columns,
+                truncated: rows.len() >= limit,
+                rows,
+                limit,
+            })
+        })
+        .await
+        .with_context(|| "SQLite row preview task failed")?
+    }
+
     fn database_type(&self) -> DatabaseType {
         DatabaseType::SQLite
+    }
+}
+
+fn sqlite_value_to_string(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(value) => value.to_string(),
+        ValueRef::Real(value) => value.to_string(),
+        ValueRef::Text(bytes) => String::from_utf8_lossy(bytes).to_string(),
+        ValueRef::Blob(bytes) => format!("<{} bytes>", bytes.len()),
     }
 }

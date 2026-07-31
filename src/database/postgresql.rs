@@ -11,11 +11,12 @@ use crate::database::connection::DatabaseConnector;
 
 pub struct PostgresConnector {
     client: Option<Client>,
+    simple_mode: bool,
 }
 
 impl PostgresConnector {
     pub fn new() -> Self {
-        Self { client: None }
+        Self { client: None, simple_mode: false }
     }
 
     fn parse_index_columns(index_def: &str) -> Vec<String> {
@@ -76,7 +77,7 @@ impl Default for PostgresConnector {
 
 #[async_trait]
 impl DatabaseConnector for PostgresConnector {
-    async fn connect(&mut self, connection_string: &str) -> Result<()> {
+    async fn connect(&mut self, connection_string: &str, options: &crate::core::types::ConnectOptions) -> Result<()> {
         let config: tokio_postgres::Config = connection_string
             .parse()
             .with_context(|| "Invalid PostgreSQL connection string")?;
@@ -121,9 +122,11 @@ impl DatabaseConnector for PostgresConnector {
 
         // If connection takes longer than this, surface helpful guidance (Neon cold-starts can be slow).
         use tokio::time::{timeout, Duration};
-        match timeout(Duration::from_secs(25), connect_fut).await {
+        let to_secs = options.connect_timeout_secs.unwrap_or(25);
+        match timeout(Duration::from_secs(to_secs), connect_fut).await {
             Ok(Ok(client)) => {
                 self.client = Some(client);
+                self.simple_mode = options.simple_mode;
                 Ok(())
             }
             Ok(Err(e)) => Err(e),
@@ -141,14 +144,30 @@ impl DatabaseConnector for PostgresConnector {
             .client
             .as_ref()
             .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
-
-        let row = client
-            .query_one("SELECT 1", &[])
-            .await
-            .with_context(|| "PostgreSQL health check failed")?;
-        let value: i32 = row.get(0);
-
-        Ok(value == 1)
+        if self.simple_mode {
+            // use simple_query to avoid prepared statements
+            let msgs = client
+                .simple_query("SELECT 1")
+                .await
+                .with_context(|| "PostgreSQL simple health check failed")?;
+            for m in msgs {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = m {
+                    if let Some(val) = row.get(0) {
+                        if val == "1" {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            Ok(false)
+        } else {
+            let row = client
+                .query_one("SELECT 1", &[])
+                .await
+                .with_context(|| "PostgreSQL health check failed")?;
+            let value: i32 = row.get(0);
+            Ok(value == 1)
+        }
     }
 
     async fn introspect_schema(&self) -> Result<SchemaSnapshot> {
@@ -287,14 +306,36 @@ impl DatabaseConnector for PostgresConnector {
             .client
             .as_ref()
             .ok_or_else(|| anyhow!("PostgreSQL connection is not initialized"))?;
-
         let explain_sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}");
-        let row = client
-            .query_one(&explain_sql, &[])
-            .await
-            .with_context(|| "Failed to run PostgreSQL EXPLAIN")?;
 
-        let raw: serde_json::Value = row.get(0);
+        let parsed_opt: Option<serde_json::Value> = if self.simple_mode {
+            let msgs = client
+                .simple_query(&explain_sql)
+                .await
+                .with_context(|| "Failed to run PostgreSQL EXPLAIN (simple mode)")?;
+            // collect text rows and parse first as JSON
+            let mut parsed = None;
+            for m in msgs {
+                if let tokio_postgres::SimpleQueryMessage::Row(row) = m {
+                    if let Some(s) = row.get(0) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                            parsed = Some(v);
+                            break;
+                        }
+                    }
+                }
+            }
+            parsed
+        } else {
+            let row = client
+                .query_one(&explain_sql, &[])
+                .await
+                .with_context(|| "Failed to run PostgreSQL EXPLAIN")?;
+
+            Some(row.get(0))
+        };
+
+        let raw = parsed_opt.unwrap_or_else(|| serde_json::json!({}));
         let plan_value = raw
             .as_array()
             .and_then(|arr| arr.first())

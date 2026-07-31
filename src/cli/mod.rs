@@ -36,6 +36,14 @@ pub enum Commands {
         /// Output format (text, json, yaml)
         #[arg(short, long, default_value = "text")]
         output: OutputFormat,
+
+        /// Force simple queries (avoid prepared statements, for pgbouncer transaction pooling)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds (overrides default)
+        #[arg(long)]
+        connect_timeout: Option<u64>,
     },
     /// Interactive mode for multiple queries
     Interactive {
@@ -50,6 +58,14 @@ pub enum Commands {
         /// Output format (text, json, yaml)
         #[arg(short, long, default_value = "text")]
         output: OutputFormat,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
     },
     /// Analyze multiple queries from file
     Batch {
@@ -64,12 +80,28 @@ pub enum Commands {
         /// Output file for recommendations
         #[arg(short, long)]
         output: std::path::PathBuf,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
     },
     /// Introspect and print database schema
     Schema {
         /// Database connection string
         #[arg(short, long)]
         db: String,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
     },
 }
 
@@ -78,23 +110,22 @@ impl Cli {
         let handler = CommandHandler::new();
 
         match &self.command {
-            Commands::Analyze {
-                query,
-                db,
-                explain,
-                output,
-            } => {
+            Commands::Analyze { query, db, explain, output, simple_mode, connect_timeout } => {
                 handler
-                    .handle_analyze(query, db, *explain, output.clone(), self.verbose)
+                    .handle_analyze(query, db, *explain, output.clone(), self.verbose, *simple_mode, *connect_timeout)
                     .await
             }
-            Commands::Interactive {
-                db,
-                history,
-                output: _,
-            } => handler.handle_interactive(history, db).await,
-            Commands::Batch { db, input, output } => handler.handle_batch(input, output, db).await,
-            Commands::Schema { db } => handler.handle_schema(db).await,
+            Commands::Interactive { db, history, output: _, simple_mode, connect_timeout } => {
+                handler.handle_interactive(history, db, *simple_mode, *connect_timeout).await
+            }
+            Commands::Batch { db, input, output, simple_mode, connect_timeout } => {
+                handler
+                    .handle_batch(input, output, db, *simple_mode, *connect_timeout)
+                    .await
+            }
+            Commands::Schema { db, simple_mode, connect_timeout } => {
+                handler.handle_schema(db, *simple_mode, *connect_timeout).await
+            }
         }
     }
 }

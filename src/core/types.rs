@@ -119,3 +119,9 @@ pub enum Severity {
     High,
     Critical,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConnectOptions {
+    pub simple_mode: bool,
+    pub connect_timeout_secs: Option<u64>,
+}

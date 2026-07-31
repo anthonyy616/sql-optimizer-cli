@@ -24,6 +24,8 @@ impl CommandHandler {
         explain: bool,
         output_format: OutputFormat,
         verbose: bool,
+        simple_mode: bool,
+        connect_timeout: Option<u64>,
     ) -> Result<()> {
         if verbose {
             eprintln!(
@@ -49,7 +51,11 @@ impl CommandHandler {
 
         // Create and connect to database
         let mut connector = create_connector(db_type);
-        connector.connect(db_url).await?;
+        let options = crate::core::types::ConnectOptions {
+            simple_mode,
+            connect_timeout_secs: connect_timeout,
+        };
+        connector.connect(db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -77,7 +83,13 @@ impl CommandHandler {
         Ok(())
     }
 
-    pub async fn handle_interactive(&self, history_file: &PathBuf, db_url: &str) -> Result<()> {
+    pub async fn handle_interactive(
+        &self,
+        history_file: &PathBuf,
+        db_url: &str,
+        simple_mode: bool,
+        connect_timeout: Option<u64>,
+    ) -> Result<()> {
         use dialoguer::Input;
         use std::fs::OpenOptions;
         use std::io::Write;
@@ -98,7 +110,11 @@ impl CommandHandler {
 
         // Create and connect to database
         let mut connector = create_connector(db_type);
-        connector.connect(db_url).await?;
+        let options = crate::core::types::ConnectOptions {
+            simple_mode,
+            connect_timeout_secs: connect_timeout,
+        };
+        connector.connect(db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -175,6 +191,8 @@ impl CommandHandler {
         input_file: &PathBuf,
         output_file: &PathBuf,
         db_url: &str,
+        simple_mode: bool,
+        connect_timeout: Option<u64>,
     ) -> Result<()> {
         use std::fs;
 
@@ -196,7 +214,11 @@ impl CommandHandler {
 
         // Create and connect to database
         let mut connector = create_connector(db_type);
-        connector.connect(db_url).await?;
+        let options = crate::core::types::ConnectOptions {
+            simple_mode,
+            connect_timeout_secs: connect_timeout,
+        };
+        connector.connect(db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -231,7 +253,7 @@ impl CommandHandler {
         Ok(())
     }
 
-    pub async fn handle_schema(&self, db_url: &str) -> Result<()> {
+    pub async fn handle_schema(&self, db_url: &str, simple_mode: bool, connect_timeout: Option<u64>) -> Result<()> {
         // Determine database type from URL
         let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
             DatabaseType::PostgreSQL
@@ -247,7 +269,11 @@ impl CommandHandler {
         };
 
         let mut connector = create_connector(db_type);
-        connector.connect(db_url).await?;
+        let options = crate::core::types::ConnectOptions {
+            simple_mode,
+            connect_timeout_secs: connect_timeout,
+        };
+        connector.connect(db_url, &options).await?;
 
         let schema = connector.introspect_schema().await?;
 

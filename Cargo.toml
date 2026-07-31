@@ -41,6 +41,7 @@ thiserror = "1.0"
 regex = "1.10"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+urlencoding = "2.1"
 
 # Fingerprinting
 sha2 = "0.10"
@@ -54,6 +55,7 @@ tabled = "0.15"
 # Configuration
 config = "0.13"
 dirs = "5.0"
+dotenvy = "0.15"
 
 # Logging
 tracing = "0.1"

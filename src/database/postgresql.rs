@@ -95,7 +95,11 @@ impl DatabaseConnector for PostgresConnector {
 
         let connect_fut = async {
             if ssl_mode == SslMode::Require {
-                let tls = native_tls::TlsConnector::builder()
+                let mut tls_builder = native_tls::TlsConnector::builder();
+                if options.accept_invalid_certs {
+                    tls_builder.danger_accept_invalid_certs(true);
+                }
+                let tls = tls_builder
                     .build()
                     .with_context(|| "Failed to build TLS connector")?;
                 let tls_connector = postgres_native_tls::MakeTlsConnector::new(tls);

@@ -3,7 +3,85 @@ pub mod output;
 
 use crate::cli::commands::CommandHandler;
 use crate::core::types::*;
-use clap::{Parser, Subcommand};
+use anyhow::{anyhow, Result};
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct ConnectionArgs {
+    /// Database connection string
+    #[arg(short, long, env = "SQL_OPTIMIZER_DB_URL")]
+    pub db: Option<String>,
+
+    /// Database host used when building a connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_HOST")]
+    pub db_host: Option<String>,
+
+    /// Database port used when building a connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_PORT")]
+    pub db_port: Option<u16>,
+
+    /// Database user used when building a connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_USER")]
+    pub db_user: Option<String>,
+
+    /// Database password used when building a connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_PASSWORD")]
+    pub db_password: Option<String>,
+
+    /// Database name used when building a connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_NAME")]
+    pub db_name: Option<String>,
+
+    /// SSL mode used when building a PostgreSQL connection string from parts
+    #[arg(long, env = "SQL_OPTIMIZER_DB_SSLMODE", default_value = "require")]
+    pub db_sslmode: String,
+
+    /// Allow self-signed or otherwise invalid certificates when building a PostgreSQL connection string
+    #[arg(long, env = "SQL_OPTIMIZER_DB_ACCEPT_INVALID_CERTS")]
+    pub accept_invalid_certs: bool,
+}
+
+impl ConnectionArgs {
+    pub fn resolve_connection_string(&self) -> Result<String> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(db.clone());
+        }
+
+        let host = self.db_host.as_ref().ok_or_else(|| {
+            anyhow!("Missing database host. Provide --db or set SQL_OPTIMIZER_DB_HOST.")
+        })?;
+        let user = self.db_user.as_ref().ok_or_else(|| {
+            anyhow!("Missing database user. Provide --db or set SQL_OPTIMIZER_DB_USER.")
+        })?;
+        let password = self.db_password.as_ref().ok_or_else(|| {
+            anyhow!("Missing database password. Provide --db or set SQL_OPTIMIZER_DB_PASSWORD.")
+        })?;
+        let name = self.db_name.as_ref().ok_or_else(|| {
+            anyhow!("Missing database name. Provide --db or set SQL_OPTIMIZER_DB_NAME.")
+        })?;
+
+        let port = self.db_port.unwrap_or(5432);
+        let sslmode = if self.db_sslmode.trim().is_empty() {
+            "require"
+        } else {
+            self.db_sslmode.as_str()
+        };
+
+        let encoded_user = urlencoding::encode(user);
+        let encoded_password = urlencoding::encode(password);
+        let encoded_name = urlencoding::encode(name);
+        let formatted_host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.clone()
+        };
+
+        Ok(format!(
+            "postgresql://{}:{}@{}:{}/{}?sslmode={}",
+            encoded_user, encoded_password, formatted_host, port, encoded_name, sslmode
+        ))
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "sql-optimizer-cli")]
@@ -25,9 +103,8 @@ pub enum Commands {
         /// SQL query to analyze
         query: String,
 
-        /// Database connection string
-        #[arg(short, long)]
-        db: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
 
         /// Show execution plan
         #[arg(long)]
@@ -47,9 +124,8 @@ pub enum Commands {
     },
     /// Interactive mode for multiple queries
     Interactive {
-        /// Database connection string
-        #[arg(short, long)]
-        db: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
 
         /// History file path
         #[arg(short, long, default_value = "~/.sql-optimizer-history")]
@@ -69,9 +145,8 @@ pub enum Commands {
     },
     /// Analyze multiple queries from file
     Batch {
-        /// Database connection string
-        #[arg(short, long)]
-        db: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
 
         /// Input file with queries
         #[arg(short, long)]
@@ -91,9 +166,8 @@ pub enum Commands {
     },
     /// Introspect and print database schema
     Schema {
-        /// Database connection string
-        #[arg(short, long)]
-        db: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
 
         /// Force simple queries (avoid prepared statements)
         #[arg(long)]
@@ -112,7 +186,7 @@ impl Cli {
         match &self.command {
             Commands::Analyze {
                 query,
-                db,
+                connection,
                 explain,
                 output,
                 simple_mode,
@@ -121,7 +195,7 @@ impl Cli {
                 handler
                     .handle_analyze(
                         query,
-                        db,
+                        connection,
                         *explain,
                         output.clone(),
                         self.verbose,
@@ -131,34 +205,49 @@ impl Cli {
                     .await
             }
             Commands::Interactive {
-                db,
+                connection,
                 history,
                 output: _,
                 simple_mode,
                 connect_timeout,
             } => {
                 handler
-                    .handle_interactive(history, db, *simple_mode, *connect_timeout)
+                    .handle_interactive(
+                        history,
+                        connection,
+                        *simple_mode,
+                        *connect_timeout,
+                    )
                     .await
             }
             Commands::Batch {
-                db,
+                connection,
                 input,
                 output,
                 simple_mode,
                 connect_timeout,
             } => {
                 handler
-                    .handle_batch(input, output, db, *simple_mode, *connect_timeout)
+                    .handle_batch(
+                        input,
+                        output,
+                        connection,
+                        *simple_mode,
+                        *connect_timeout,
+                    )
                     .await
             }
             Commands::Schema {
-                db,
+                connection,
                 simple_mode,
                 connect_timeout,
             } => {
                 handler
-                    .handle_schema(db, *simple_mode, *connect_timeout)
+                    .handle_schema(
+                        connection,
+                        *simple_mode,
+                        *connect_timeout,
+                    )
                     .await
             }
         }

@@ -28,10 +28,42 @@ cp target/release/sql-optimizer-cli ~/.local/bin/
 
 ### Quick Start
 
+The CLI now supports two connection styles:
+
+1. Pass a full connection URL with `--db`.
+2. Set `SQL_OPTIMIZER_DB_*` values in a `.env` file and run the command without typing the
+  password inline.
+
+Example `.env` values:
+
+```bash
+SQL_OPTIMIZER_DB_HOST=db.example.supabase.co
+SQL_OPTIMIZER_DB_PORT=5432
+SQL_OPTIMIZER_DB_USER=postgres
+SQL_OPTIMIZER_DB_PASSWORD=your_password_here
+SQL_OPTIMIZER_DB_NAME=postgres
+SQL_OPTIMIZER_DB_SSLMODE=require
+SQL_OPTIMIZER_DB_ACCEPT_INVALID_CERTS=false
+```
+
+The fastest smoke test is the schema command:
+
+```bash
+cargo run -- schema
+```
+
+If your Supabase or pooler certificate chain is not trusted in WSL, you can explicitly opt into
+trusting it for local testing:
+
+```bash
+cargo run -- schema --accept-invalid-certs
+```
+
 **Analyze a Single Query**
 ```bash
 sql-optimizer-cli analyze "SELECT * FROM users WHERE email = 'test@example.com'" --db postgresql://user:password@localhost:5432/mydb
 ```
+
 **Interactive Mode**
 ```bash
 sql-optimizer-cli interactive --db postgresql://user:password@localhost:5432/mydb
@@ -50,6 +82,14 @@ The tool supports standard connection strings for PostgreSQL and MySQL:
 PostgreSQL: postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...] MySQL: mysql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
 ```
 
+When using `.env`, place the file in the directory you run the CLI from. The CLI reads
+environment values automatically at startup.
+
+**TLS / Supabase troubleshooting**
+
+If WSL rejects the certificate chain for your Supabase host, use `--accept-invalid-certs` only for
+local testing. Keep it off for normal use.
+
 ### **Command Reference**
 
 **analyze**
@@ -66,6 +106,9 @@ sql-optimizer-cli analyze "SELECT u.*, o.total FROM users u JOIN orders o ON u.i
 **--output json|yaml|text**: Output format
 
 **--verbose**: Detailed analysis information
+
+**--accept-invalid-certs**: Allow a self-signed or otherwise untrusted TLS certificate chain for
+PostgreSQL connections
 
 **interactive**
 Start an interactive session:

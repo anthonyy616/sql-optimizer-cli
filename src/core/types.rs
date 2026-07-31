@@ -124,4 +124,5 @@ pub enum Severity {
 pub struct ConnectOptions {
     pub simple_mode: bool,
     pub connect_timeout_secs: Option<u64>,
+    pub accept_invalid_certs: bool,
 }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::cli::output::OutputFormatter;
+use crate::cli::ConnectionArgs;
 use crate::core::analyzer::SqlAnalyzer;
 use crate::core::types::{DatabaseType, OutputFormat};
 use crate::database::connection::create_connector;
@@ -21,13 +22,15 @@ impl CommandHandler {
     pub async fn handle_analyze(
         &self,
         query: &str,
-        db_url: &str,
+        connection: &ConnectionArgs,
         explain: bool,
         output_format: OutputFormat,
         verbose: bool,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
+        let db_url = connection.resolve_connection_string()?;
+
         if verbose {
             eprintln!(
                 "Connecting to database: {}",
@@ -55,8 +58,9 @@ impl CommandHandler {
         let options = crate::core::types::ConnectOptions {
             simple_mode,
             connect_timeout_secs: connect_timeout,
+            accept_invalid_certs: connection.accept_invalid_certs,
         };
-        connector.connect(db_url, &options).await?;
+        connector.connect(&db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -87,13 +91,15 @@ impl CommandHandler {
     pub async fn handle_interactive(
         &self,
         history_file: &PathBuf,
-        db_url: &str,
+        connection: &ConnectionArgs,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
         use dialoguer::Input;
         use std::fs::OpenOptions;
         use std::io::Write;
+
+        let db_url = connection.resolve_connection_string()?;
 
         // Determine database type
         let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
@@ -114,8 +120,9 @@ impl CommandHandler {
         let options = crate::core::types::ConnectOptions {
             simple_mode,
             connect_timeout_secs: connect_timeout,
+            accept_invalid_certs: connection.accept_invalid_certs,
         };
-        connector.connect(db_url, &options).await?;
+        connector.connect(&db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -191,11 +198,13 @@ impl CommandHandler {
         &self,
         input_file: &PathBuf,
         output_file: &PathBuf,
-        db_url: &str,
+        connection: &ConnectionArgs,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
         use std::fs;
+
+        let db_url = connection.resolve_connection_string()?;
 
         println!("Processing batch file: {:?}", input_file);
 
@@ -218,8 +227,9 @@ impl CommandHandler {
         let options = crate::core::types::ConnectOptions {
             simple_mode,
             connect_timeout_secs: connect_timeout,
+            accept_invalid_certs: connection.accept_invalid_certs,
         };
-        connector.connect(db_url, &options).await?;
+        connector.connect(&db_url, &options).await?;
 
         // Create analyzer with database connection
         let analyzer_with_db = self.analyzer.with_database();
@@ -256,10 +266,12 @@ impl CommandHandler {
 
     pub async fn handle_schema(
         &self,
-        db_url: &str,
+        connection: &ConnectionArgs,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
+        let db_url = connection.resolve_connection_string()?;
+
         // Determine database type from URL
         let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
             DatabaseType::PostgreSQL
@@ -278,8 +290,9 @@ impl CommandHandler {
         let options = crate::core::types::ConnectOptions {
             simple_mode,
             connect_timeout_secs: connect_timeout,
+            accept_invalid_certs: connection.accept_invalid_certs,
         };
-        connector.connect(db_url, &options).await?;
+        connector.connect(&db_url, &options).await?;
 
         let schema = connector.introspect_schema().await?;
 

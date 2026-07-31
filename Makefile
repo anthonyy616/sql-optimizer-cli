@@ -17,9 +17,8 @@ clean:
 	cargo clean
 
 # Install locally
-install: build
-	mkdir -p ~/.local/bin
-	cp target/release/sql-optimizer-cli ~/.local/bin/sql-optimizer-cli
+install:
+	bash scripts/install.sh
 
 # Run benchmarks
 benchmark:

@@ -16,15 +16,23 @@ A command-line tool that analyzes SQL queries and provides optimization recommen
 
 ### From Cargo
 ```bash
-cargo install sql-optimizer-cli
+cargo install --path . --locked
 ```
 From Source
 ```bash
 git clone https://github.com/anthonyy616/sql-optimizer-cli.git
 cd sql-optimizer-cli
-cargo build --release
-cp target/release/sql-optimizer-cli ~/.local/bin/
+./scripts/install.sh
 ```
+
+After installation, the main binary is available on your PATH as `sql-optimizer-cli`, and the
+install step also creates shortcut commands named `analyze`, `batch`, `interactive`, and
+`schema` in your Cargo bin directory. During local development, use `cargo run -- analyze ...`
+instead of invoking the binary from `./target/debug`.
+
+Database connections are created per command run. `analyze`, `batch`, and `schema` open a fresh
+connection, use it for that command, and then exit. `interactive` keeps the connection open for
+the lifetime of that interactive session only.
 
 ### Quick Start
 
@@ -46,10 +54,15 @@ SQL_OPTIMIZER_DB_SSLMODE=require
 SQL_OPTIMIZER_DB_ACCEPT_INVALID_CERTS=false
 ```
 
+For Supabase, prefer the session pooler connection string for short-lived CLI runs. If your
+environment is IPv4-only or your database hostname is not reachable over IPv6, use the IPv4
+endpoint instead of a hostname that resolves only on IPv6. When connecting through a pooler,
+add `--simple-mode` so the client avoids prepared statements.
+
 The fastest smoke test is the schema command:
 
 ```bash
-cargo run -- schema
+cargo run -- schema --db "$SQL_OPTIMIZER_DB_URL"
 ```
 
 If your Supabase or pooler certificate chain is not trusted in WSL, you can explicitly opt into
@@ -81,6 +94,10 @@ The tool supports standard connection strings for PostgreSQL and MySQL:
 ```bash
 PostgreSQL: postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...] MySQL: mysql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
 ```
+
+For Supabase and similar hosted Postgres services, the session pooler URL is usually the best
+fit for this CLI's short-lived connections. If your setup needs IPv4, use the IPv4 endpoint or
+direct host that your network can actually reach.
 
 When using `.env`, place the file in the directory you run the CLI from. The CLI reads
 environment values automatically at startup.
@@ -121,6 +138,48 @@ Process multiple queries from a file:
 
 ```bash
 sql-optimizer-cli batch --input queries.sql --output results.json --db mysql://localhost/mydb
+```
+
+### Reusable Query Scripts
+
+Save these as shell scripts if you want a repeatable way to run the CLI with your env vars:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+sql-optimizer-cli analyze "$1" \
+  --db "${SQL_OPTIMIZER_DB_URL}" \
+  --simple-mode
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+sql-optimizer-cli batch \
+  --input queries.sql \
+  --output recommendations.json \
+  --db "${SQL_OPTIMIZER_DB_URL}" \
+  --simple-mode
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+sql-optimizer-cli interactive \
+  --db "${SQL_OPTIMIZER_DB_URL}" \
+  --simple-mode
+```
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+sql-optimizer-cli schema \
+  --db "${SQL_OPTIMIZER_DB_URL}" \
+  --simple-mode
 ```
 
 ## Output Examples

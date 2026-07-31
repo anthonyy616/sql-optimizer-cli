@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo build --release
-mkdir -p "${HOME}/.local/bin"
-cp target/release/sql-optimizer-cli "${HOME}/.local/bin/sql-optimizer-cli"
+cargo install --path . --locked --force
 
-echo "Installed sql-optimizer-cli to ${HOME}/.local/bin/sql-optimizer-cli"
+cargo_bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+for shortcut in analyze batch interactive schema; do
+	ln -sf sql-optimizer-cli "${cargo_bin_dir}/${shortcut}"
+done
+
+echo "Installed sql-optimizer-cli and shortcut commands to ${cargo_bin_dir}"

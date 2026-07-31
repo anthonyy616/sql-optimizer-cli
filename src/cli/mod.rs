@@ -5,6 +5,42 @@ use crate::cli::commands::CommandHandler;
 use crate::core::types::*;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+
+const COMMAND_SHORTCUTS: &[&str] = &["analyze", "batch", "interactive", "schema"];
+
+pub fn normalize_invocation<I>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args: Vec<OsString> = args.into_iter().collect();
+    if args.len() < 2 {
+        return args;
+    }
+
+    let program_name = args
+        .first()
+        .and_then(|path| Path::new(path).file_stem())
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+
+    if !COMMAND_SHORTCUTS.contains(&program_name) {
+        return args;
+    }
+
+    let first_argument = args
+        .get(1)
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+
+    if first_argument == program_name {
+        return args;
+    }
+
+    args.insert(1, OsString::from(program_name));
+    args
+}
 
 #[derive(Debug, Clone, Args, Default)]
 pub struct ConnectionArgs {
@@ -251,5 +287,39 @@ impl Cli {
                     .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_invocation;
+    use std::ffi::OsString;
+
+    #[test]
+    fn prepends_shortcut_program_name_as_subcommand() {
+        let args = vec![
+            OsString::from("analyze"),
+            OsString::from("SELECT 1"),
+            OsString::from("--db"),
+            OsString::from("sqlite::memory:"),
+        ];
+
+        let normalized = normalize_invocation(args);
+
+        assert_eq!(normalized[1], OsString::from("analyze"));
+        assert_eq!(normalized[2], OsString::from("SELECT 1"));
+    }
+
+    #[test]
+    fn leaves_normal_binary_invocation_unchanged() {
+        let args = vec![
+            OsString::from("sql-optimizer-cli"),
+            OsString::from("analyze"),
+            OsString::from("SELECT 1"),
+        ];
+
+        let normalized = normalize_invocation(args.clone());
+
+        assert_eq!(normalized, args);
     }
 }

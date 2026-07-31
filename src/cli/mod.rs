@@ -110,21 +110,56 @@ impl Cli {
         let handler = CommandHandler::new();
 
         match &self.command {
-            Commands::Analyze { query, db, explain, output, simple_mode, connect_timeout } => {
+            Commands::Analyze {
+                query,
+                db,
+                explain,
+                output,
+                simple_mode,
+                connect_timeout,
+            } => {
                 handler
-                    .handle_analyze(query, db, *explain, output.clone(), self.verbose, *simple_mode, *connect_timeout)
+                    .handle_analyze(
+                        query,
+                        db,
+                        *explain,
+                        output.clone(),
+                        self.verbose,
+                        *simple_mode,
+                        *connect_timeout,
+                    )
                     .await
             }
-            Commands::Interactive { db, history, output: _, simple_mode, connect_timeout } => {
-                handler.handle_interactive(history, db, *simple_mode, *connect_timeout).await
+            Commands::Interactive {
+                db,
+                history,
+                output: _,
+                simple_mode,
+                connect_timeout,
+            } => {
+                handler
+                    .handle_interactive(history, db, *simple_mode, *connect_timeout)
+                    .await
             }
-            Commands::Batch { db, input, output, simple_mode, connect_timeout } => {
+            Commands::Batch {
+                db,
+                input,
+                output,
+                simple_mode,
+                connect_timeout,
+            } => {
                 handler
                     .handle_batch(input, output, db, *simple_mode, *connect_timeout)
                     .await
             }
-            Commands::Schema { db, simple_mode, connect_timeout } => {
-                handler.handle_schema(db, *simple_mode, *connect_timeout).await
+            Commands::Schema {
+                db,
+                simple_mode,
+                connect_timeout,
+            } => {
+                handler
+                    .handle_schema(db, *simple_mode, *connect_timeout)
+                    .await
             }
         }
     }

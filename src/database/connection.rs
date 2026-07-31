@@ -13,7 +13,11 @@ pub fn create_connector(db_type: DatabaseType) -> Box<dyn DatabaseConnector> {
 
 #[async_trait]
 pub trait DatabaseConnector: Send + Sync {
-    async fn connect(&mut self, connection_string: &str, options: &crate::core::types::ConnectOptions) -> Result<()>;
+    async fn connect(
+        &mut self,
+        connection_string: &str,
+        options: &crate::core::types::ConnectOptions,
+    ) -> Result<()>;
     async fn disconnect(&mut self) -> Result<()>;
     async fn test_connection(&self) -> Result<bool>;
     async fn introspect_schema(&self) -> Result<SchemaSnapshot>;

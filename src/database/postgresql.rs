@@ -16,7 +16,10 @@ pub struct PostgresConnector {
 
 impl PostgresConnector {
     pub fn new() -> Self {
-        Self { client: None, simple_mode: false }
+        Self {
+            client: None,
+            simple_mode: false,
+        }
     }
 
     fn parse_index_columns(index_def: &str) -> Vec<String> {
@@ -77,7 +80,11 @@ impl Default for PostgresConnector {
 
 #[async_trait]
 impl DatabaseConnector for PostgresConnector {
-    async fn connect(&mut self, connection_string: &str, options: &crate::core::types::ConnectOptions) -> Result<()> {
+    async fn connect(
+        &mut self,
+        connection_string: &str,
+        options: &crate::core::types::ConnectOptions,
+    ) -> Result<()> {
         let config: tokio_postgres::Config = connection_string
             .parse()
             .with_context(|| "Invalid PostgreSQL connection string")?;

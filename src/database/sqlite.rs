@@ -79,7 +79,11 @@ impl Default for SqliteConnector {
 
 #[async_trait]
 impl DatabaseConnector for SqliteConnector {
-    async fn connect(&mut self, connection_string: &str, _options: &crate::core::types::ConnectOptions) -> Result<()> {
+    async fn connect(
+        &mut self,
+        connection_string: &str,
+        _options: &crate::core::types::ConnectOptions,
+    ) -> Result<()> {
         let path = Self::parse_path(connection_string)?;
         let path_for_open = path.clone();
 

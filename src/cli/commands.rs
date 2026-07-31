@@ -17,6 +17,7 @@ impl CommandHandler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_analyze(
         &self,
         query: &str,
@@ -253,7 +254,12 @@ impl CommandHandler {
         Ok(())
     }
 
-    pub async fn handle_schema(&self, db_url: &str, simple_mode: bool, connect_timeout: Option<u64>) -> Result<()> {
+    pub async fn handle_schema(
+        &self,
+        db_url: &str,
+        simple_mode: bool,
+        connect_timeout: Option<u64>,
+    ) -> Result<()> {
         // Determine database type from URL
         let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
             DatabaseType::PostgreSQL

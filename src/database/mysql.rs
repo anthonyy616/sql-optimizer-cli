@@ -81,7 +81,11 @@ impl Default for MySqlConnector {
 
 #[async_trait]
 impl DatabaseConnector for MySqlConnector {
-    async fn connect(&mut self, connection_string: &str, _options: &crate::core::types::ConnectOptions) -> Result<()> {
+    async fn connect(
+        &mut self,
+        connection_string: &str,
+        _options: &crate::core::types::ConnectOptions,
+    ) -> Result<()> {
         let opts = Opts::from_url(connection_string).with_context(|| {
             "Invalid MySQL connection URL. Expected mysql://user:pass@host:port/db"
         })?;

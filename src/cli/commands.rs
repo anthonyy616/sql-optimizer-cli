@@ -1,10 +1,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
+use std::{fs, io::Write, path::Path};
 
 use crate::cli::output::OutputFormatter;
 use crate::cli::ConnectionArgs;
 use crate::core::analyzer::SqlAnalyzer;
 use crate::core::types::{DatabaseType, OutputFormat};
+use crate::core::fingerprint::fingerprint;
 use crate::database::connection::create_connector;
 
 pub struct CommandHandler {
@@ -24,6 +26,8 @@ impl CommandHandler {
         query: &str,
         connection: &ConnectionArgs,
         explain: bool,
+        show_rows: bool,
+        row_limit: usize,
         output_format: OutputFormat,
         verbose: bool,
         simple_mode: bool,
@@ -71,19 +75,35 @@ impl CommandHandler {
         let schema = connector.introspect_schema().await?;
         result.schema_snapshot = Some(schema);
 
+        if show_rows {
+            match connector.preview_rows(query, row_limit).await {
+                Ok(preview) => result.row_preview = Some(preview),
+                Err(e) => eprintln!("Warning: row preview unavailable: {}", e),
+            }
+        }
+
         // Run schema-dependent checks (missing index, etc.)
         let analyzer = crate::core::analyzer::SqlAnalyzer::new();
         analyzer.run_schema_checks(&mut result).await?;
 
         // Show execution plan if requested
         if explain {
-            let plan = connector.explain_query(query).await?;
-            result.explain_plan = Some(plan);
+            match connector.explain_query(query).await {
+                Ok(plan) => result.explain_plan = Some(plan),
+                Err(e) => eprintln!("Warning: explain unavailable: {}", e),
+            }
         }
 
         // Format and output results
-        let formatter = OutputFormatter::new(output_format);
-        formatter.format(&result)?;
+        let is_text = matches!(output_format, OutputFormat::Text);
+        let formatter = OutputFormatter::new(output_format.clone());
+        if is_text {
+            formatter.format(&result)?;
+        } else {
+            let rendered = formatter.render(&result)?;
+            let path = write_auto_output("analyze", query, &output_format, &rendered)?;
+            println!("Results written to {}", path.display());
+        }
 
         Ok(())
     }
@@ -92,6 +112,9 @@ impl CommandHandler {
         &self,
         history_file: &PathBuf,
         connection: &ConnectionArgs,
+        show_rows: bool,
+        row_limit: usize,
+        output_format: OutputFormat,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
@@ -168,8 +191,22 @@ impl CommandHandler {
             // Analyze the query
             match analyzer_with_db.analyze_query(&query, db_type).await {
                 Ok(result) => {
-                    let formatter = OutputFormatter::new(OutputFormat::Text);
-                    formatter.format(&result)?;
+                    let mut result = result;
+                    if show_rows {
+                        match connector.preview_rows(&query, row_limit).await {
+                            Ok(preview) => result.row_preview = Some(preview),
+                            Err(e) => eprintln!("Warning: row preview unavailable: {}", e),
+                        }
+                    }
+
+                    let formatter = OutputFormatter::new(output_format.clone());
+                    if matches!(output_format, OutputFormat::Text) {
+                        formatter.format(&result)?;
+                    } else {
+                        let rendered = formatter.render(&result)?;
+                        let path = write_auto_output("interactive", &query, &output_format, &rendered)?;
+                        println!("Results written to {}", path.display());
+                    }
                     println!(); // Add spacing between results
                 }
                 Err(e) => {
@@ -197,13 +234,12 @@ impl CommandHandler {
     pub async fn handle_batch(
         &self,
         input_file: &PathBuf,
-        output_file: &PathBuf,
+        output_file: &Option<PathBuf>,
+        output_format: OutputFormat,
         connection: &ConnectionArgs,
         simple_mode: bool,
         connect_timeout: Option<u64>,
     ) -> Result<()> {
-        use std::fs;
-
         let db_url = connection.resolve_connection_string()?;
 
         println!("Processing batch file: {:?}", input_file);
@@ -253,14 +289,32 @@ impl CommandHandler {
             }
         }
 
-        // Write results to output file
         let json_output = serde_json::to_string_pretty(&results)?;
-        fs::write(output_file, json_output)?;
-
-        println!(
-            "Batch analysis complete. Results written to: {:?}",
-            output_file
-        );
+        if let Some(output_file) = output_file {
+            fs::write(output_file, json_output)?;
+            println!("Batch analysis complete. Results written to: {:?}", output_file);
+        } else if !matches!(output_format, OutputFormat::Text) {
+            let rendered = match output_format {
+                OutputFormat::Json => json_output,
+                OutputFormat::Yaml => serde_yaml::to_string(&results)?,
+                OutputFormat::Markdown => {
+                    let mut rendered = String::new();
+                    for (i, result) in results.iter().enumerate() {
+                        if i > 0 {
+                            rendered.push_str("\n\n");
+                        }
+                        rendered.push_str(&OutputFormatter::new(OutputFormat::Markdown).render(result)?);
+                    }
+                    rendered
+                }
+                OutputFormat::Text => unreachable!(),
+            };
+            let path = write_auto_output("batch", &content, &output_format, &rendered)?;
+            println!("Results written to {}", path.display());
+            println!("Batch analysis complete.");
+        } else {
+            println!("Batch analysis complete.");
+        }
         Ok(())
     }
 
@@ -309,6 +363,30 @@ impl CommandHandler {
 
         Ok(())
     }
+}
+
+fn write_auto_output(
+    job_type: &str,
+    query: &str,
+    format: &OutputFormat,
+    contents: &str,
+) -> Result<std::path::PathBuf> {
+    let extension = match format {
+        OutputFormat::Json => "json",
+        OutputFormat::Yaml => "yaml",
+        OutputFormat::Markdown => "md",
+        OutputFormat::Text => return Err(anyhow::anyhow!("text output is not auto-written")),
+    };
+
+    let prefix = &fingerprint(query)[..8];
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let file_name = format!("{}_{}_{}.{}", job_type, prefix, timestamp, extension);
+    let output_dir = Path::new("output");
+    fs::create_dir_all(output_dir)?;
+    let path = output_dir.join(file_name);
+    let mut file = fs::File::create(&path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(path)
 }
 
 impl Default for CommandHandler {

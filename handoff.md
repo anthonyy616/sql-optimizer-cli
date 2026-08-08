@@ -44,12 +44,3 @@ Files touched (high-level):
 - `tests/patterns_missing_index_tests.rs`
 - `docs/cloud-postgres.md`, `scripts/test_cloud_postgres.sh`
 
-Notes and next steps:
-- Implement automatic pgbouncer detection: retry with `simple_mode` when prepared-statement errors are observed.
-- Add `--ci` convenience flag and tune default timeouts for CI environments.
-- Continue Phase 3: implement remaining detectors (cartesian product, inefficient join, sensitive data, injection), add confidence labels and paired integration tests exercising real DBs.
-- Phase 3.5: implement structured fix suggestions and DDL generation for high-confidence detector outputs.
-
-If you want, I can proceed to (A) implement automatic pgbouncer detection and retry-with-simple-mode, or (B) resume Phase 3 detectors now. Which should I start next?
-
--- Assistant

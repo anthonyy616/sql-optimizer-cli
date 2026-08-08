@@ -87,7 +87,7 @@ sql-optimizer-cli interactive --db postgresql://user:password@localhost:5432/myd
 
 **Batch Analysis**
 ```bash
-sql-optimizer-cli batch --input queries.sql --output recommendations.json --db mysql://user:password@localhost:3306/mydb
+sql-optimizer-cli batch --input queries.sql --output-file recommendations.json --db mysql://user:password@localhost:3306/mydb
 ```
 
 ## Usage
@@ -207,6 +207,8 @@ set -euo pipefail
   | --- | --- |
   | `QUERY` | Required SQL statement to analyze. |
   | `--explain` | Include an execution plan in the output. |
+  | `--show-rows` | Preview matching rows for a read-only `SELECT`. |
+  | `--row-limit <N>` | Limit the number of preview rows shown when `--show-rows` is enabled. |
   | `-o`, `--output <FORMAT>` | Output format. Valid values are `text`, `json`, `yaml`, and `markdown`. Defaults to `text`. |
   | `--simple-mode` | Force simple queries and avoid prepared statements. Useful for PgBouncer transaction pooling. |
   | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
@@ -234,6 +236,8 @@ set -euo pipefail
   | Flag | Description |
   | --- | --- |
   | `--history <PATH>` | History file path. Defaults to `~/.sql-optimizer-history`. |
+  | `--show-rows` | Preview matching rows for each analyzed query. |
+  | `--row-limit <N>` | Limit the number of preview rows shown when `--show-rows` is enabled. |
   | `-o`, `--output <FORMAT>` | Output format. Valid values are `text`, `json`, `yaml`, and `markdown`. Defaults to `text`. |
   | `--simple-mode` | Force simple queries and avoid prepared statements. |
   | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
@@ -251,20 +255,21 @@ set -euo pipefail
   Syntax:
 
   ```bash
-  sql-optimizer-cli batch --input <FILE> --output <FILE> [shared flags] [--simple-mode] [--connect-timeout <SECONDS>]
+  sql-optimizer-cli batch --input <FILE> [shared flags] [--output-file <FILE>] [--output <FORMAT>] [--simple-mode] [--connect-timeout <SECONDS>]
   ```
 
   | Flag | Description |
   | --- | --- |
   | `-i`, `--input <FILE>` | Input file containing SQL queries. |
-  | `-o`, `--output <FILE>` | Output file for the JSON recommendations. |
+  | `--output-file <FILE>` | Explicit JSON file for the recommendations. |
+  | `-o`, `--output <FORMAT>` | Result format. Valid values are `text`, `json`, `yaml`, and `markdown`. Defaults to `text`. |
   | `--simple-mode` | Force simple queries and avoid prepared statements. |
   | `--connect-timeout <SECONDS>` | Connection timeout in seconds. |
 
   Example:
 
   ```bash
-  sql-optimizer-cli batch --input queries.sql --output recommendations.json --db mysql://user:password@localhost:3306/mydb
+  sql-optimizer-cli batch --input queries.sql --output-file recommendations.json --db mysql://user:password@localhost:3306/mydb
   ```
 
   ### `schema`
@@ -290,9 +295,10 @@ set -euo pipefail
 
   ## Notes
 
-  The current CLI does not expose `--show-rows`, `--row-limit`, or `--output-file` as separate
-  flags. Batch output is controlled with `--output`, and row previews are represented in the result
-  model rather than toggled by CLI flags.
+  `--show-rows` and `--row-limit` control row previews for `analyze` and `interactive`. Batch uses
+  `--output-file` for an explicit JSON destination, and `--output` selects the rendered format for
+  all three commands. When `batch` is run with a non-text `--output` and no explicit output file,
+  the CLI writes an auto-named file under `output/`.
 
   ## Connection Strings
 #!/usr/bin/env bash

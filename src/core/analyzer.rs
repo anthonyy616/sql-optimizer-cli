@@ -73,7 +73,7 @@ impl SqlAnalyzer {
             security_issues,
             schema_snapshot: None,
             explain_plan: None,
-            row_preview: None,
+            row_preview: Default::default(),
             execution_time_ms: execution_time,
         })
     }

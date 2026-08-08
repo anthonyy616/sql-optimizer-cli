@@ -146,6 +146,14 @@ pub enum Commands {
         #[arg(long)]
         explain: bool,
 
+        /// Show a preview of matching rows
+        #[arg(long)]
+        show_rows: bool,
+
+        /// Row preview limit
+        #[arg(long, default_value = "50")]
+        row_limit: usize,
+
         /// Output format (text, json, yaml)
         #[arg(short, long, default_value = "text")]
         output: OutputFormat,
@@ -166,6 +174,14 @@ pub enum Commands {
         /// History file path
         #[arg(short, long, default_value = "~/.sql-optimizer-history")]
         history: std::path::PathBuf,
+
+        /// Show a preview of matching rows
+        #[arg(long)]
+        show_rows: bool,
+
+        /// Row preview limit
+        #[arg(long, default_value = "50")]
+        row_limit: usize,
 
         /// Output format (text, json, yaml)
         #[arg(short, long, default_value = "text")]
@@ -189,8 +205,12 @@ pub enum Commands {
         input: std::path::PathBuf,
 
         /// Output file for recommendations
-        #[arg(short, long)]
-        output: std::path::PathBuf,
+        #[arg(long)]
+        output_file: Option<std::path::PathBuf>,
+
+        /// Output format (text, json, yaml)
+        #[arg(short, long, default_value = "text")]
+        output: OutputFormat,
 
         /// Force simple queries (avoid prepared statements)
         #[arg(long)]
@@ -224,6 +244,8 @@ impl Cli {
                 query,
                 connection,
                 explain,
+                show_rows,
+                row_limit,
                 output,
                 simple_mode,
                 connect_timeout,
@@ -233,6 +255,8 @@ impl Cli {
                         query,
                         connection,
                         *explain,
+                        *show_rows,
+                        *row_limit,
                         output.clone(),
                         self.verbose,
                         *simple_mode,
@@ -243,23 +267,41 @@ impl Cli {
             Commands::Interactive {
                 connection,
                 history,
-                output: _,
-                simple_mode,
-                connect_timeout,
-            } => {
-                handler
-                    .handle_interactive(history, connection, *simple_mode, *connect_timeout)
-                    .await
-            }
-            Commands::Batch {
-                connection,
-                input,
+                show_rows,
+                row_limit,
                 output,
                 simple_mode,
                 connect_timeout,
             } => {
                 handler
-                    .handle_batch(input, output, connection, *simple_mode, *connect_timeout)
+                    .handle_interactive(
+                        history,
+                        connection,
+                        *show_rows,
+                        *row_limit,
+                        output.clone(),
+                        *simple_mode,
+                        *connect_timeout,
+                    )
+                    .await
+            }
+            Commands::Batch {
+                connection,
+                input,
+                output_file,
+                output,
+                simple_mode,
+                connect_timeout,
+            } => {
+                handler
+                    .handle_batch(
+                        input,
+                        output_file,
+                        output.clone(),
+                        connection,
+                        *simple_mode,
+                        *connect_timeout,
+                    )
                     .await
             }
             Commands::Schema {

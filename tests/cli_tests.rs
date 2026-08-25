@@ -39,6 +39,7 @@ async fn analyze_runs_end_to_end_for_sqlite() {
             false, // simple_mode
             None,  // connect_timeout
             Profile::Oltp,
+            false, // track
         )
         .await;
 

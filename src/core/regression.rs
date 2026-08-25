@@ -232,7 +232,7 @@ impl StateStore {
                             curr / prev as f64
                         ),
                         current_value: format!("{:.0}", curr),
-                        previous_value: prev.to_string(),
+                        previous_value: format!("{:.0}", prev),
                     });
                 }
             }

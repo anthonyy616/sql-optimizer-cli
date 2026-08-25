@@ -87,7 +87,7 @@ sql-optimizer-cli interactive --db postgresql://user:password@localhost:5432/myd
 
 **Batch Analysis**
 ```bash
-sql-optimizer-cli batch --input queries.sql --output-file recommendations.json --db mysql://user:password@localhost:3306/mydb
+givsql-optimizer-cli batch --input queries.sql --output-file recommendations.json --db mysql://user:password@localhost:3306/mydb
 ```
 
 ## Usage

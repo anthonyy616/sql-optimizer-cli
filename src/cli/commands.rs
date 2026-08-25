@@ -33,6 +33,7 @@ impl CommandHandler {
         simple_mode: bool,
         connect_timeout: Option<u64>,
         profile: Profile,
+        track: bool,
     ) -> Result<()> {
         let db_url = connection.resolve_connection_string()?;
 
@@ -94,6 +95,57 @@ impl CommandHandler {
             match connector.explain_query(query).await {
                 Ok(plan) => result.explain_plan = Some(plan),
                 Err(e) => eprintln!("Warning: explain unavailable: {}", e),
+            }
+        }
+
+        // Phase 3.8: regression tracking
+        let should_track = track || crate::core::regression::StateStore::default_exists();
+        if should_track {
+            let plan_summary = result
+                .explain_plan
+                .as_ref()
+                .and_then(|p| crate::core::explain::plain_explain_summary(&Some(p.clone())));
+            let index_used = result
+                .explain_plan
+                .as_ref()
+                .and_then(|p| p.root.as_ref().and_then(|r| r.index_used.clone()));
+
+            match crate::core::regression::StateStore::open_default() {
+                Ok(store) => {
+                    // Detect regressions against history
+                    let regressions = store.detect_regressions(
+                        query,
+                        Some(result.execution_time_ms),
+                        plan_summary.as_deref(),
+                        index_used.as_deref(),
+                    );
+
+                    if let Ok(regs) = regressions {
+                        for reg in regs {
+                            result.regressions.push(crate::core::types::RegressionInfo {
+                                regression_type: format!("{:?}", reg.regression_type),
+                                description: reg.description,
+                                current_value: reg.current_value,
+                                previous_value: reg.previous_value,
+                            });
+                        }
+                    }
+
+                    // Record this run
+                    let _ = store.record_run(
+                        query,
+                        Some(result.execution_time_ms),
+                        None,
+                        plan_summary.as_deref(),
+                        index_used.as_deref(),
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not open state store for regression tracking: {}",
+                        e
+                    );
+                }
             }
         }
 
@@ -377,6 +429,90 @@ impl CommandHandler {
             }
             for idx in &table.indexes {
                 println!("  [idx] {} ({})", idx.name, idx.columns.join(", "));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn handle_health(
+        &self,
+        connection: &ConnectionArgs,
+        simple_mode: bool,
+        connect_timeout: Option<u64>,
+    ) -> Result<()> {
+        use colored::*;
+
+        let db_url = connection.resolve_connection_string()?;
+
+        let db_type = if db_url.starts_with("postgresql") || db_url.starts_with("postgres") {
+            DatabaseType::PostgreSQL
+        } else if db_url.starts_with("mysql") {
+            DatabaseType::MySQL
+        } else if db_url.starts_with("sqlite")
+            || db_url.ends_with(".db")
+            || db_url.ends_with(".sqlite")
+        {
+            DatabaseType::SQLite
+        } else {
+            return Err(anyhow::anyhow!("Unsupported database URL format"));
+        };
+
+        let mut connector = create_connector(db_type);
+        let options = crate::core::types::ConnectOptions {
+            simple_mode,
+            connect_timeout_secs: connect_timeout,
+            accept_invalid_certs: connection.accept_invalid_certs,
+        };
+        connector.connect(&db_url, &options).await?;
+
+        println!("{}", "Database Health Snapshot".bold().cyan());
+        println!("{}", "========================".bold().cyan());
+        println!("Database type: {:?}", db_type);
+        println!();
+
+        // Schema overview
+        let schema = connector.introspect_schema().await?;
+        println!("{}", "Schema Overview:".bold().yellow());
+        println!("  Tables: {}", schema.tables.len());
+        let total_cols: usize = schema.tables.iter().map(|t| t.columns.len()).sum();
+        let total_indexes: usize = schema.tables.iter().map(|t| t.indexes.len()).sum();
+        let total_fks: usize = schema.tables.iter().map(|t| t.foreign_keys.len()).sum();
+        println!("  Total columns: {}", total_cols);
+        println!("  Total indexes: {}", total_indexes);
+        println!("  Total foreign keys: {}", total_fks);
+        println!();
+
+        // Per-table stats
+        println!("{}", "Table Details:".bold().yellow());
+        for table in &schema.tables {
+            println!(
+                "  {} ({} cols, {} idx, {} FKs)",
+                table.name,
+                table.columns.len(),
+                table.indexes.len(),
+                table.foreign_keys.len(),
+            );
+        }
+        println!();
+
+        // Stats availability
+        match db_type {
+            DatabaseType::PostgreSQL => {
+                println!("{}", "Runtime Stats:".bold().yellow());
+                println!("  pg_stat_statements: requires the extension to be installed and superuser access.");
+                println!("  To enable: CREATE EXTENSION IF NOT EXISTS pg_stat_statements;");
+                println!("  Then run: sql-optimizer-cli health --db <url> to see top queries by total time.");
+            }
+            DatabaseType::MySQL => {
+                println!("{}", "Runtime Stats:".bold().yellow());
+                println!("  performance_schema: requires it to be enabled (usually on by default in MySQL 5.7+)");
+                println!("  To check: SELECT @@performance_schema; (should return 1)");
+            }
+            DatabaseType::SQLite => {
+                println!("{}", "Runtime Stats:".bold().yellow());
+                println!("  SQLite does not have a built-in query stats extension.");
+                println!("  Consider using the `EXPLAIN QUERY PLAN` output for individual query analysis.");
             }
         }
 

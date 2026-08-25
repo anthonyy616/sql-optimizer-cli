@@ -95,6 +95,17 @@ pub struct AnalysisResult {
     pub explain_plan: Option<QueryPlan>,
     pub row_preview: Option<RowPreview>,
     pub execution_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regressions: Vec<RegressionInfo>,
+}
+
+/// Regression info serialized into JSON output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionInfo {
+    pub regression_type: String,
+    pub description: String,
+    pub current_value: String,
+    pub previous_value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,7 +160,7 @@ pub struct SecurityIssue {
     pub location: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SecurityIssueType {
     SqlInjection,
     SensitiveDataExposure,

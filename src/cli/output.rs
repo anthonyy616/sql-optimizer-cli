@@ -135,6 +135,24 @@ impl OutputFormatter {
             }
         }
 
+        // Regressions
+        if !result.regressions.is_empty() {
+            println!();
+            println!("{}", "REGRESSIONS DETECTED:".bold().red());
+            for (i, reg) in result.regressions.iter().enumerate() {
+                println!(
+                    "{}. [{}] {}",
+                    i + 1,
+                    reg.regression_type,
+                    reg.description.bright_red()
+                );
+                println!(
+                    "   Current: {} | Previous: {}",
+                    reg.current_value, reg.previous_value
+                );
+            }
+        }
+
         Ok(())
     }
 

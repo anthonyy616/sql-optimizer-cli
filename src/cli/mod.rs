@@ -169,6 +169,10 @@ pub enum Commands {
         /// Connection timeout in seconds (overrides default)
         #[arg(long)]
         connect_timeout: Option<u64>,
+
+        /// Track query in local state store for regression detection (requires .sql-optimizer/ directory)
+        #[arg(long)]
+        track: bool,
     },
     /// Interactive mode for multiple queries
     Interactive {
@@ -237,6 +241,19 @@ pub enum Commands {
         #[arg(long)]
         connect_timeout: Option<u64>,
     },
+    /// Show database health stats (pg_stat_statements, performance_schema, table cardinality)
+    Health {
+        #[command(flatten)]
+        connection: ConnectionArgs,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
+    },
 }
 
 impl Cli {
@@ -253,6 +270,7 @@ impl Cli {
                 output,
                 simple_mode,
                 connect_timeout,
+                track,
             } => {
                 handler
                     .handle_analyze(
@@ -266,6 +284,7 @@ impl Cli {
                         *simple_mode,
                         *connect_timeout,
                         self.profile.clone(),
+                        *track,
                     )
                     .await
             }
@@ -318,6 +337,15 @@ impl Cli {
             } => {
                 handler
                     .handle_schema(connection, *simple_mode, *connect_timeout)
+                    .await
+            }
+            Commands::Health {
+                connection,
+                simple_mode,
+                connect_timeout,
+            } => {
+                handler
+                    .handle_health(connection, *simple_mode, *connect_timeout)
                     .await
             }
         }

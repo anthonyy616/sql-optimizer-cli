@@ -49,7 +49,6 @@ impl SqlAnalyzer {
         let statements = self.parse_query(query, dialect)?;
 
         let mut recommendations = Vec::new();
-        let mut security_issues = Vec::new();
 
         for statement in &statements {
             if let Statement::Query(query_box) = statement {
@@ -64,7 +63,10 @@ impl SqlAnalyzer {
             }
         }
 
-        self.basic_security_analysis(query, &mut security_issues)?;
+        // Run security analysis via the validator (replaces inline basic_security_analysis)
+        // Schema-aware checks happen in run_schema_checks when schema is available
+        let (security_score, security_issues) =
+            crate::security::validator::validate_security(query, &SchemaSnapshot::default());
 
         let execution_time = start_time.elapsed().as_millis() as u64;
 
@@ -73,26 +75,85 @@ impl SqlAnalyzer {
             database_type: db_type,
             profile,
             recommendations,
-            security_score: if security_issues.is_empty() {
-                100.0
-            } else {
-                50.0
-            },
+            security_score,
             security_issues,
             schema_snapshot: None,
             explain_plan: None,
             row_preview: Default::default(),
             execution_time_ms: execution_time,
+            regressions: vec![],
         })
     }
 
+    /// Run all schema-dependent detectors: missing index, cartesian product,
+    /// inefficient joins, N+1 patterns, and schema-aware security checks.
     pub async fn run_schema_checks(&self, result: &mut AnalysisResult) -> Result<()> {
-        if let Some(schema) = &result.schema_snapshot {
-            // call missing index detector
-            let mut recs =
-                crate::patterns::missing_index::detect_missing_index(&result.query, schema);
-            result.recommendations.append(&mut recs);
+        let schema = match &result.schema_snapshot {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+
+        // Pattern detectors
+        let mut missing_index_recs =
+            crate::patterns::missing_index::detect_missing_index(&result.query, &schema);
+        let mut cartesian_recs =
+            crate::patterns::cartesian_product::detect_cartesian_product(&result.query, &schema);
+        let mut join_recs =
+            crate::patterns::inefficient_join::detect_inefficient_joins(&result.query, &schema);
+        let mut n_plus_one_recs =
+            crate::patterns::n_plus_one::detect_n_plus_one(&result.query, &schema);
+
+        result.recommendations.append(&mut missing_index_recs);
+        result.recommendations.append(&mut cartesian_recs);
+        result.recommendations.append(&mut join_recs);
+        result.recommendations.append(&mut n_plus_one_recs);
+
+        // Schema-aware security checks (re-run with real schema)
+        let (_sec_score, sec_issues) =
+            crate::security::validator::validate_security(&result.query, &schema);
+
+        // Merge security issues — keep existing, add new
+        for issue in sec_issues {
+            let is_dup = result.security_issues.iter().any(|existing| {
+                existing.issue_type == issue.issue_type && existing.location == issue.location
+            });
+            if !is_dup {
+                result.security_issues.push(issue);
+            }
         }
+
+        // Recompute score with all issues
+        result.security_score =
+            crate::security::validator::compute_security_score(&result.security_issues);
+
+        // Generate fix suggestions via the rewriter
+        let fixes = crate::rewriting::rewriter::generate_fixes(
+            &result.query,
+            &result.recommendations,
+            &schema,
+        );
+        if !fixes.is_empty() {
+            // Attach fix suggestions as DDL-bearing recommendations for index fixes
+            for fix in fixes {
+                if let Some(ddl) = &fix.ddl {
+                    result.recommendations.push(Recommendation {
+                        recommendation_type: RecommendationType::QueryRewrite,
+                        table: None,
+                        columns: vec![],
+                        description: format!("Fix: {}", fix.explanation),
+                        estimated_improvement: 0.5,
+                        sql_suggestion: Some(ddl.clone()),
+                        confidence: fix.confidence.clone(),
+                    });
+                }
+            }
+        }
+
+        // Phase 3.6: cost-aware analytics recommendations
+        let cost_estimate = crate::core::cost::estimate_query_cost(result);
+        let cost_recs =
+            crate::core::cost::generate_analytics_recommendations(&cost_estimate, &result.profile);
+        result.recommendations.extend(cost_recs);
 
         Ok(())
     }
@@ -218,33 +279,6 @@ impl SqlAnalyzer {
                 ),
                 confidence: ConfidenceTier::SyntacticGuess,
             });
-        }
-
-        Ok(())
-    }
-
-    fn basic_security_analysis(&self, query: &str, issues: &mut Vec<SecurityIssue>) -> Result<()> {
-        let dangerous_patterns = [
-            "union select",
-            "drop table",
-            "delete from",
-            "insert into",
-            "update set",
-            "exec(",
-            "execute(",
-            "sp_executesql",
-        ];
-
-        let query_lower = query.to_lowercase();
-        for pattern in dangerous_patterns {
-            if query_lower.contains(pattern) {
-                issues.push(SecurityIssue {
-                    issue_type: SecurityIssueType::SqlInjection,
-                    description: format!("Potentially dangerous SQL pattern detected: {}", pattern),
-                    severity: Severity::Medium,
-                    location: Some(format!("Contains '{}'", pattern)),
-                });
-            }
         }
 
         Ok(())

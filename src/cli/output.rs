@@ -53,6 +53,7 @@ impl OutputFormatter {
             println!("{}", "OPTIMIZATION OPPORTUNITIES:".bold().yellow());
             for (i, rec) in result.recommendations.iter().enumerate() {
                 println!("{}. {}", i + 1, rec.description.bright_yellow());
+                println!("   Confidence: {}", rec.confidence);
                 if let Some(suggestion) = &rec.sql_suggestion {
                     println!("   Suggestion: {}", suggestion.dimmed());
                 }
@@ -150,9 +151,17 @@ impl OutputFormatter {
 
         writeln!(&mut output, "# SQL Analysis Results")?;
         writeln!(&mut output)?;
-        writeln!(&mut output, "- **Query:** `{}`", escape_markdown_inline(&result.query))?;
+        writeln!(
+            &mut output,
+            "- **Query:** `{}`",
+            escape_markdown_inline(&result.query)
+        )?;
         writeln!(&mut output, "- **Database:** `{:?}`", result.database_type)?;
-        writeln!(&mut output, "- **Analysis Time:** {}ms", result.execution_time_ms)?;
+        writeln!(
+            &mut output,
+            "- **Analysis Time:** {}ms",
+            result.execution_time_ms
+        )?;
         writeln!(&mut output)?;
 
         writeln!(&mut output, "## Optimization Opportunities")?;
@@ -185,8 +194,7 @@ impl OutputFormatter {
                 writeln!(
                     &mut output,
                     "- {} (Severity: `{:?}`)",
-                    issue.description,
-                    issue.severity
+                    issue.description, issue.severity
                 )?;
             }
         }

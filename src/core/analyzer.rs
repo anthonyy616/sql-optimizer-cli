@@ -36,6 +36,7 @@ impl SqlAnalyzer {
         &self,
         query: &str,
         db_type: DatabaseType,
+        profile: Profile,
     ) -> Result<AnalysisResult> {
         let start_time = std::time::Instant::now();
 
@@ -52,8 +53,14 @@ impl SqlAnalyzer {
 
         for statement in &statements {
             if let Statement::Query(query_box) = statement {
-                self.analyze_select_query(query_box, query, &mut recommendations, db_type)
-                    .await?;
+                self.analyze_select_query(
+                    query_box,
+                    query,
+                    &mut recommendations,
+                    db_type,
+                    profile.clone(),
+                )
+                .await?;
             }
         }
 
@@ -64,6 +71,7 @@ impl SqlAnalyzer {
         Ok(AnalysisResult {
             query: query.to_string(),
             database_type: db_type,
+            profile,
             recommendations,
             security_score: if security_issues.is_empty() {
                 100.0
@@ -95,9 +103,10 @@ impl SqlAnalyzer {
         query: &str,
         recommendations: &mut Vec<Recommendation>,
         db_type: DatabaseType,
+        profile: Profile,
     ) -> Result<()> {
         if let SetExpr::Select(select) = &*query_box.body {
-            self.analyze_select_statement(select, query, recommendations, db_type)
+            self.analyze_select_statement(select, query, recommendations, db_type, profile)
                 .await?;
         }
 
@@ -110,6 +119,7 @@ impl SqlAnalyzer {
         query: &str,
         recommendations: &mut Vec<Recommendation>,
         db_type: DatabaseType,
+        _profile: Profile,
     ) -> Result<()> {
         if select
             .projection
@@ -128,6 +138,7 @@ impl SqlAnalyzer {
                     "Consider adding specific columns and WHERE clause if not all data is needed"
                         .to_string(),
                 ),
+                confidence: ConfidenceTier::SyntacticGuess,
             });
         }
 
@@ -158,6 +169,7 @@ impl SqlAnalyzer {
                     sql_suggestion: Some(
                         "Replace IN subquery with INNER JOIN for better performance".to_string(),
                     ),
+                    confidence: ConfidenceTier::SyntacticGuess,
                 });
             }
             sqlparser::ast::Expr::BinaryOp {
@@ -175,6 +187,7 @@ impl SqlAnalyzer {
                     sql_suggestion: Some(
                         "Correlated subqueries are often slower than JOINs".to_string(),
                     ),
+                    confidence: ConfidenceTier::SyntacticGuess,
                 });
             }
             _ => {}
@@ -203,6 +216,7 @@ impl SqlAnalyzer {
                 sql_suggestion: Some(
                     "Specify only the columns you need instead of SELECT *".to_string(),
                 ),
+                confidence: ConfidenceTier::SyntacticGuess,
             });
         }
 

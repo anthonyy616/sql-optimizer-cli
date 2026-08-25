@@ -46,30 +46,119 @@ impl SqliteConnector {
     }
 
     fn parse_explain_detail(detail: &str) -> QueryPlanNode {
-        let index_regex =
-            Regex::new(r"USING (?:COVERING )?INDEX ([^ ]+)").expect("valid sqlite explain regex");
-        let index_used = index_regex
-            .captures(detail)
-            .and_then(|caps| caps.get(1))
-            .map(|m| m.as_str().to_string());
-
         let upper = detail.to_uppercase();
-        let node_type = if upper.starts_with("SCAN") {
-            "scan"
-        } else if upper.starts_with("SEARCH") {
-            "search"
+
+        // Determine the operation type from the detail string
+        let node_type = if upper.contains("SCAN TABLE") || upper.starts_with("SCAN") {
+            "sequential scan"
+        } else if upper.contains("SEARCH TABLE") || upper.starts_with("SEARCH") {
+            "index search"
+        } else if upper.contains("USE TEMP B-TREE") {
+            "temp b-tree"
+        } else if upper.contains("COMPOUND") {
+            "compound query"
+        } else if upper.contains("SUBQUERY") {
+            "subquery"
+        } else if upper.contains("MATERIALIZATION") {
+            "materialization"
+        } else if upper.contains("SORT") {
+            "sort"
+        } else if upper.contains("WINDOW") {
+            "window function"
+        } else if upper.contains("AGGREGATE") {
+            "aggregate"
         } else {
             "operation"
         }
         .to_string();
 
+        // Extract table name
+        let table_re = Regex::new(r"(?i)(?:TABLE|INDEX)\s+([\w.]+)").unwrap();
+        let table_name = table_re
+            .captures(detail)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string());
+
+        // Extract index name (look for USING INDEX or USING COVERING INDEX)
+        let index_regex = Regex::new(r"(?i)USING\s+(?:COVERING\s+)?INDEX\s+([\w.]+)").unwrap();
+        let index_used = index_regex
+            .captures(detail)
+            .and_then(|caps| caps.get(1))
+            .map(|m| m.as_str().to_string());
+
+        // Detect if this is a covering index scan
+        let is_covering = upper.contains("COVERING INDEX");
+
+        // Build a descriptive node type that includes the table and index info
+        let mut description = node_type.clone();
+        if let Some(ref tbl) = table_name {
+            description.push_str(&format!(" on '{}'", tbl));
+        }
+        if let Some(ref idx) = index_used {
+            if is_covering {
+                description.push_str(&format!(" using covering index '{}'", idx));
+            } else {
+                description.push_str(&format!(" using index '{}'", idx));
+            }
+        } else if upper.contains("SCAN TABLE") {
+            description.push_str(" (no index)");
+        }
+
+        // Detect USE TEMP B-TREE hints (ORDER BY, GROUP BY without index)
+        if upper.contains("USE TEMP B-TREE FOR ORDER BY") {
+            description.push_str(" [temp b-tree for ORDER BY]");
+        } else if upper.contains("USE TEMP B-TREE FOR GROUP BY") {
+            description.push_str(" [temp b-tree for GROUP BY]");
+        }
+
         QueryPlanNode {
-            node_type,
+            node_type: description,
             cost: None,
             rows: None,
             index_used,
             children: Vec::new(),
         }
+    }
+
+    /// Parse the full EXPLAIN QUERY PLAN output into a tree of QueryPlanNodes.
+    /// SQLite returns rows with columns: id, parent, notused, detail.
+    fn parse_explain_tree(rows: &[(i64, i64, i64, String)]) -> Option<QueryPlanNode> {
+        if rows.is_empty() {
+            return None;
+        }
+
+        // Build nodes indexed by id
+        let mut nodes: std::collections::BTreeMap<i64, QueryPlanNode> =
+            std::collections::BTreeMap::new();
+        let mut children_map: std::collections::BTreeMap<i64, Vec<i64>> =
+            std::collections::BTreeMap::new();
+
+        for (id, parent, _notused, detail) in rows {
+            let node = Self::parse_explain_detail(detail);
+            nodes.insert(*id, node);
+            children_map.entry(*parent).or_default().push(*id);
+        }
+
+        // The root has parent = 0 (or -1 in some SQLite versions)
+        let root_id = rows.first().map(|(id, _, _, _)| *id).unwrap_or(0);
+
+        // Recursively build the tree
+        fn build_tree(
+            id: i64,
+            nodes: &std::collections::BTreeMap<i64, QueryPlanNode>,
+            children_map: &std::collections::BTreeMap<i64, Vec<i64>>,
+        ) -> QueryPlanNode {
+            let mut node = nodes.get(&id).cloned().unwrap_or_default();
+            if let Some(child_ids) = children_map.get(&id) {
+                node.children = child_ids
+                    .iter()
+                    .map(|child_id| build_tree(*child_id, nodes, children_map))
+                    .collect();
+            }
+            node
+        }
+
+        Some(build_tree(root_id, &nodes, &children_map))
     }
 }
 
@@ -248,14 +337,20 @@ impl DatabaseConnector for SqliteConnector {
             let conn = Self::open_connection(&path)?;
             let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
             let mut stmt = conn.prepare(&explain_sql)?;
-            let details = stmt
-                .query_map([], |row| row.get::<_, String>(3))?
+            // EXPLAIN QUERY PLAN returns: id, parent, notused, detail
+            let rows: Vec<(i64, i64, i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
 
-            let root = details
-                .first()
-                .map(|detail| Self::parse_explain_detail(detail));
-            let raw = serde_json::json!({ "details": details });
+            let root = Self::parse_explain_tree(&rows);
+            let raw = serde_json::json!({ "rows": rows });
 
             Ok(QueryPlan {
                 engine: "sqlite".to_string(),

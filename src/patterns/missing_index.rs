@@ -1,4 +1,4 @@
-use crate::core::types::{Recommendation, RecommendationType, SchemaSnapshot};
+use crate::core::types::{ConfidenceTier, Recommendation, RecommendationType, SchemaSnapshot};
 use regex::Regex;
 
 pub fn detect_missing_index(query: &str, schema: &SchemaSnapshot) -> Vec<Recommendation> {
@@ -7,7 +7,7 @@ pub fn detect_missing_index(query: &str, schema: &SchemaSnapshot) -> Vec<Recomme
     // Heuristic: find the main table from FROM clause
     let from_re = Regex::new(r"(?i)from\s+([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
     let where_re =
-        Regex::new(r"(?i)where\s+[^=<>]*([a-zA-Z_][a-zA-Z0-9_]*)\s*(=|like|ilike|in) ").unwrap();
+        Regex::new(r"(?i)where\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(=|like|ilike|in\b)").unwrap();
 
     let table = from_re
         .captures(query)
@@ -47,6 +47,7 @@ pub fn detect_missing_index(query: &str, schema: &SchemaSnapshot) -> Vec<Recomme
                         "CREATE INDEX idx_{}_{} ON {}({});",
                         table_name, col, table_name, col
                     )),
+                    confidence: ConfidenceTier::SchemaVerified,
                 });
             }
         }

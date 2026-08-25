@@ -8,6 +8,13 @@ pub enum DatabaseType {
     SQLite,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ValueEnum, Default, PartialEq, Eq)]
+pub enum Profile {
+    #[default]
+    Oltp,
+    Analytics,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SchemaSnapshot {
     pub tables: Vec<TableSchema>,
@@ -79,6 +86,8 @@ pub enum OutputFormat {
 pub struct AnalysisResult {
     pub query: String,
     pub database_type: DatabaseType,
+    #[serde(default)]
+    pub profile: Profile,
     pub recommendations: Vec<Recommendation>,
     pub security_score: f64,
     pub security_issues: Vec<SecurityIssue>,
@@ -96,6 +105,31 @@ pub struct Recommendation {
     pub description: String,
     pub estimated_improvement: f64,
     pub sql_suggestion: Option<String>,
+    pub confidence: ConfidenceTier,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConfidenceTier {
+    /// Pattern detected purely from SQL syntax, no database context.
+    SyntacticGuess,
+    /// Verified against real database schema (indexes, columns, constraints).
+    SchemaVerified,
+    /// Verified against a real EXPLAIN plan output.
+    PlanVerified,
+    /// Detected from query shape resembling known ORM output patterns.
+    /// Never elevated to schema/plan-verified on its own.
+    OrmHeuristic,
+}
+
+impl std::fmt::Display for ConfidenceTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfidenceTier::SyntacticGuess => write!(f, "syntactic guess"),
+            ConfidenceTier::SchemaVerified => write!(f, "schema-verified"),
+            ConfidenceTier::PlanVerified => write!(f, "plan-verified"),
+            ConfidenceTier::OrmHeuristic => write!(f, "orm-heuristic"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -35,19 +35,15 @@ clippy:
 # Check everything
 check: fmt clippy test
 
-# Build for different targets
+# Build for different targets (Unix only — Linux/macOS)
 build-linux:
 	cross build --target x86_64-unknown-linux-musl --release
 
 build-macos:
 	cross build --target x86_64-apple-darwin --release
 
-build-windows:
-	cross build --target x86_64-pc-windows-gnu --release
-
 # Development setup
 dev-setup:
 	rustup target add x86_64-unknown-linux-musl
 	rustup target add x86_64-apple-darwin
-	rustup target add x86_64-pc-windows-gnu
 	cargo install cross

@@ -130,6 +130,10 @@ pub struct Cli {
     /// Verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Analysis profile: oltp (backend/app queries) or analytics (data engineering/pipeline queries)
+    #[arg(long, value_enum, default_value_t, global = true)]
+    pub profile: crate::core::types::Profile,
 }
 
 #[derive(Subcommand)]
@@ -261,6 +265,7 @@ impl Cli {
                         self.verbose,
                         *simple_mode,
                         *connect_timeout,
+                        self.profile.clone(),
                     )
                     .await
             }
@@ -282,6 +287,7 @@ impl Cli {
                         output.clone(),
                         *simple_mode,
                         *connect_timeout,
+                        self.profile.clone(),
                     )
                     .await
             }
@@ -301,6 +307,7 @@ impl Cli {
                         connection,
                         *simple_mode,
                         *connect_timeout,
+                        self.profile.clone(),
                     )
                     .await
             }

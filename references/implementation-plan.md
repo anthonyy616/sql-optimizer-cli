@@ -101,22 +101,55 @@ new project-wide scan command and any annotation-emitting mode.
 
 ---
 
-## 2. Current state (ground truth, unchanged from v1 — verified against the actual repo)
+## 2. Current state (ground truth — verified against the actual repo, updated 2026-08-25)
 
-**What works:** CLI parsing (`clap`) with `analyze`/`interactive`/`batch`; `sqlparser`-based AST
-parsing, dialect-aware; two shallow detectors (`SELECT *` without `WHERE`, `IN` subquery →
-suggest JOIN); substring-match security scan; text/JSON/YAML output.
+**What works (Phases 0, 1, 1.5, 2 substantively complete):**
+- CLI parsing (`clap`) with `analyze`/`interactive`/`batch`/`schema`; `--profile oltp|analytics`
+  threaded through the pipeline; shortcut commands (`analyze`, `batch`, etc.) via symlink.
+- `sqlparser`-based AST parsing, dialect-aware (Postgres, MySQL, SQLite).
+- **Real database connectors** — `tokio-postgres` with TLS, `mysql_async`, `rusqlite` — all
+  connect, introspect schema (tables, columns, indexes, foreign keys), run real EXPLAIN
+  (Postgres `EXPLAIN ANALYZE FORMAT JSON`, MySQL `EXPLAIN FORMAT=JSON`, SQLite
+  `EXPLAIN QUERY PLAN`), and do row previews with read-only guard.
+- `--simple-mode` (pgbouncer-friendly) and `--connect-timeout` (Neon cold-start) wired through.
+- **`schema` subcommand** renders introspected schema; plain-English EXPLAIN summary via
+  `core/explain.rs`.
+- **Query fingerprinting** — `canonicalize_query()` strips literals, normalizes whitespace/casing;
+  `fingerprint()` produces SHA-256 hex. Tested.
+- **Missing-index detector** (`patterns/missing_index.rs`) cross-references WHERE columns against
+  real schema indexes, generates `CREATE INDEX` suggestions with `SchemaVerified` confidence.
+- **Inline detectors** in `core/analyzer.rs`: `SELECT *` without `WHERE`, `IN` subquery → suggest
+  JOIN, correlated subquery detection. All labeled `SyntacticGuess` confidence.
+- **Confidence labels** (`ConfidenceTier` enum: `SyntacticGuess` / `SchemaVerified` /
+  `PlanVerified` / `OrmHeuristic`) on every `Recommendation`.
+- Text/JSON/YAML/Markdown output; auto-written output files for non-text formats.
+- `Makefile`/`install.sh` binary name matches; UTF-16 encoding issues resolved; Windows targets
+  removed from Makefile.
+- Test suite: 3 unit tests (analyzer, fingerprint, missing-index), 1 integration test (SQLite
+  schema introspection), 1 CLI end-to-end test (SQLite analyze) — all in `tests/` (Cargo
+  convention), all passing.
 
-**What does not work, despite appearances:** `PostgresConnector`/`MySqlConnector` don't actually
-connect; `--explain` is a static placeholder; no schema introspection exists yet, so the README's
-sample "Missing Index" output isn't producible; `patterns/*.rs`, `security/*.rs` (beyond the
-inline stub), `rewriting/rewriter.rs`, `core/optimizer.rs`, `utils/*.rs` are one-line stubs; both
-test files are empty; `docs/architecture.md` describes intended end-state, not current reality;
-housekeeping bugs (UTF-16 files, `Makefile` binary-name mismatch) remain unfixed.
+**What is still a stub (Phase 3 partially done, Phases 3.5–8 not started):**
+- `patterns/cartesian_product.rs`, `patterns/inefficient_join.rs`, `patterns/n_plus_one.rs` —
+  one-line placeholder stubs (the N+1 logic lives inline in `analyzer.rs`).
+- `security/injection.rs`, `security/sensitive_data.rs`, `security/validator.rs` — one-line
+  placeholder stubs (basic substring security scan lives inline in `analyzer.rs`).
+- `rewriting/rewriter.rs`, `core/optimizer.rs`, `utils/formatters.rs` — one-line stubs.
+- No composite/covering index suggestions, no partitioning detection, no "index wouldn't help"
+  negative-case logic.
+- No `pg_stat_statements` / `performance_schema` reading (Phase 3.7).
+- No query dedup/grouping utility (Phase 1.5's grouping half).
+- No project-wide `scan` command (Phase 5).
+- No ORM-aware analysis (Phase 6).
+- No CI annotation formats (Phase 7).
+- No workload regression tracking / local state store (Phase 3.8).
+- No fix suggestions / rewrite previews with diff output (Phase 3.5).
+- SQLite EXPLAIN parser is basic (scan vs search, no cost/rows extraction).
+- `docs/architecture.md` describes intended end-state, not current reality.
 
-**Implication, unchanged:** Phase 1 (real DB connections + schema introspection) is the
-prerequisite almost everything else — including every new capability in this revision — depends
-on being truthful rather than decorative.
+**Phase 1 is no longer the blocking prerequisite** — it is substantively complete. The current
+blocking gap is Phase 3's remaining detectors (the modular security and pattern files are still
+stubs) and Phase 3.5's fix-generation layer.
 
 ---
 

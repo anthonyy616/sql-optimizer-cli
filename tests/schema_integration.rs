@@ -1,5 +1,5 @@
+use sql_optimizer_cli::core::types::{ConnectOptions, DatabaseType};
 use sql_optimizer_cli::database::connection::create_connector;
-use sql_optimizer_cli::core::types::DatabaseType;
 use tempfile::NamedTempFile;
 
 #[tokio::test]
@@ -20,7 +20,8 @@ async fn sqlite_schema_introspection() {
     }
 
     let mut connector = create_connector(DatabaseType::SQLite);
-    connector.connect(&db_url).await.expect("connect");
+    let options = ConnectOptions::default();
+    connector.connect(&db_url, &options).await.expect("connect");
     let schema = connector.introspect_schema().await.expect("introspect");
 
     assert!(schema.tables.iter().any(|t| t.name == "users"));

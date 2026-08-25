@@ -5,8 +5,8 @@ use std::{fs, io::Write, path::Path};
 use crate::cli::output::OutputFormatter;
 use crate::cli::ConnectionArgs;
 use crate::core::analyzer::SqlAnalyzer;
-use crate::core::types::{DatabaseType, OutputFormat};
 use crate::core::fingerprint::fingerprint;
+use crate::core::types::{DatabaseType, OutputFormat, Profile};
 use crate::database::connection::create_connector;
 
 pub struct CommandHandler {
@@ -32,6 +32,7 @@ impl CommandHandler {
         verbose: bool,
         simple_mode: bool,
         connect_timeout: Option<u64>,
+        profile: Profile,
     ) -> Result<()> {
         let db_url = connection.resolve_connection_string()?;
 
@@ -70,7 +71,9 @@ impl CommandHandler {
         let analyzer_with_db = self.analyzer.with_database();
 
         // Perform analysis
-        let mut result = analyzer_with_db.analyze_query(query, db_type).await?;
+        let mut result = analyzer_with_db
+            .analyze_query(query, db_type, profile)
+            .await?;
 
         let schema = connector.introspect_schema().await?;
         result.schema_snapshot = Some(schema);
@@ -108,6 +111,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_interactive(
         &self,
         history_file: &PathBuf,
@@ -117,6 +121,7 @@ impl CommandHandler {
         output_format: OutputFormat,
         simple_mode: bool,
         connect_timeout: Option<u64>,
+        profile: Profile,
     ) -> Result<()> {
         use dialoguer::Input;
         use std::fs::OpenOptions;
@@ -189,7 +194,10 @@ impl CommandHandler {
             history.push(query.clone());
 
             // Analyze the query
-            match analyzer_with_db.analyze_query(&query, db_type).await {
+            match analyzer_with_db
+                .analyze_query(&query, db_type, profile.clone())
+                .await
+            {
                 Ok(result) => {
                     let mut result = result;
                     if show_rows {
@@ -204,7 +212,8 @@ impl CommandHandler {
                         formatter.format(&result)?;
                     } else {
                         let rendered = formatter.render(&result)?;
-                        let path = write_auto_output("interactive", &query, &output_format, &rendered)?;
+                        let path =
+                            write_auto_output("interactive", &query, &output_format, &rendered)?;
                         println!("Results written to {}", path.display());
                     }
                     println!(); // Add spacing between results
@@ -231,6 +240,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_batch(
         &self,
         input_file: &PathBuf,
@@ -239,6 +249,7 @@ impl CommandHandler {
         connection: &ConnectionArgs,
         simple_mode: bool,
         connect_timeout: Option<u64>,
+        profile: Profile,
     ) -> Result<()> {
         let db_url = connection.resolve_connection_string()?;
 
@@ -283,7 +294,10 @@ impl CommandHandler {
         for (i, query) in queries.iter().enumerate() {
             println!("Analyzing query {}/{}", i + 1, queries.len());
 
-            match analyzer_with_db.analyze_query(query, db_type).await {
+            match analyzer_with_db
+                .analyze_query(query, db_type, profile.clone())
+                .await
+            {
                 Ok(result) => results.push(result),
                 Err(e) => eprintln!("Error analyzing query {}: {}", i + 1, e),
             }
@@ -292,7 +306,10 @@ impl CommandHandler {
         let json_output = serde_json::to_string_pretty(&results)?;
         if let Some(output_file) = output_file {
             fs::write(output_file, json_output)?;
-            println!("Batch analysis complete. Results written to: {:?}", output_file);
+            println!(
+                "Batch analysis complete. Results written to: {:?}",
+                output_file
+            );
         } else if !matches!(output_format, OutputFormat::Text) {
             let rendered = match output_format {
                 OutputFormat::Json => json_output,
@@ -303,7 +320,9 @@ impl CommandHandler {
                         if i > 0 {
                             rendered.push_str("\n\n");
                         }
-                        rendered.push_str(&OutputFormatter::new(OutputFormat::Markdown).render(result)?);
+                        rendered.push_str(
+                            &OutputFormatter::new(OutputFormat::Markdown).render(result)?,
+                        );
                     }
                     rendered
                 }

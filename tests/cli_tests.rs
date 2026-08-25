@@ -1,5 +1,6 @@
 use sql_optimizer_cli::cli::commands::CommandHandler;
-use sql_optimizer_cli::core::types::OutputFormat;
+use sql_optimizer_cli::cli::ConnectionArgs;
+use sql_optimizer_cli::core::types::{OutputFormat, Profile};
 
 #[tokio::test]
 async fn analyze_runs_end_to_end_for_sqlite() {
@@ -8,8 +9,6 @@ async fn analyze_runs_end_to_end_for_sqlite() {
         .into_temp_path();
     let db_url = format!("sqlite://{}", db_path.to_string_lossy());
 
-    let handler = CommandHandler::new();
-    let query = "SELECT * FROM users";
     // Create table so analyze has something to query against
     let tmp_path = db_path.to_string_lossy().to_string();
     {
@@ -21,8 +20,26 @@ async fn analyze_runs_end_to_end_for_sqlite() {
         .expect("create table");
     }
 
+    let handler = CommandHandler::new();
+    let query = "SELECT * FROM users";
+    let connection = ConnectionArgs {
+        db: Some(db_url),
+        ..Default::default()
+    };
+
     let result = handler
-        .handle_analyze(query, &db_url, true, OutputFormat::Json, false)
+        .handle_analyze(
+            query,
+            &connection,
+            false, // explain
+            false, // show_rows
+            50,    // row_limit
+            OutputFormat::Text,
+            false, // verbose
+            false, // simple_mode
+            None,  // connect_timeout
+            Profile::Oltp,
+        )
         .await;
 
     assert!(result.is_ok(), "analyze command should succeed: {result:?}");

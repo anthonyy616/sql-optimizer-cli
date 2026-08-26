@@ -93,3 +93,65 @@ pub fn parse_pg_stats_available(row: Option<&str>) -> bool {
 pub fn parse_mysql_stats_available(row: Option<&str>) -> bool {
     row.map(|v| v == "1" || v == "ON").unwrap_or(false)
 }
+
+fn column_index(columns: &[String], name: &str) -> Option<usize> {
+    columns.iter().position(|c| c.eq_ignore_ascii_case(name))
+}
+
+/// Convert a generic read-only query result (via preview_rows) into QueryStats.
+pub fn parse_query_stat_rows(preview: &crate::core::types::RowPreview) -> Vec<QueryStat> {
+    let q = column_index(&preview.columns, "query");
+    let calls = column_index(&preview.columns, "calls");
+    let total = column_index(&preview.columns, "total_time_ms");
+    let rows = column_index(&preview.columns, "rows_returned");
+    let queryid = column_index(&preview.columns, "queryid");
+
+    preview
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map(|s| s.as_str());
+            Some(QueryStat {
+                query: get(q)?.to_string(),
+                calls: get(calls)
+                    .and_then(|v| v.replace(',', "").parse().ok())
+                    .unwrap_or(0),
+                total_time_ms: get(total)
+                    .and_then(|v| v.replace(',', "").parse().ok())
+                    .unwrap_or(0.0),
+                rows_returned: get(rows)
+                    .and_then(|v| v.replace(',', "").parse().ok())
+                    .unwrap_or(0),
+                queryid: get(queryid).map(|s| s.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// Convert a generic read-only query result (via preview_rows) into TableStats.
+pub fn parse_table_stat_rows(preview: &crate::core::types::RowPreview) -> Vec<TableStat> {
+    let name = column_index(&preview.columns, "table_name");
+    let est = column_index(&preview.columns, "estimated_rows");
+    let size_cols = [
+        column_index(&preview.columns, "index_size_bytes"),
+        column_index(&preview.columns, "total_size_bytes"),
+    ];
+
+    preview
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let get = |idx: Option<usize>| idx.and_then(|i| row.get(i)).map(|s| s.as_str());
+            Some(TableStat {
+                table_name: get(name)?.to_string(),
+                estimated_rows: get(est)
+                    .and_then(|v| v.replace(',', "").parse().ok())
+                    .unwrap_or(0),
+                index_size_bytes: size_cols
+                    .iter()
+                    .find_map(|&c| get(c))
+                    .and_then(|v| v.replace(',', "").parse().ok()),
+            })
+        })
+        .collect()
+}

@@ -138,6 +138,34 @@ impl StateStore {
         Ok(history.into_iter().next())
     }
 
+    /// Get the most recent N runs across all fingerprints (newest first).
+    pub fn get_recent_runs(&self, limit: usize) -> Result<Vec<QueryRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used
+             FROM query_runs
+             ORDER BY timestamp DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(QueryRun {
+                fingerprint: row.get(0)?,
+                query_text: row.get(1)?,
+                timestamp: row.get(2)?,
+                execution_time_ms: row.get(3)?,
+                rows_returned: row.get(4)?,
+                plan_summary: row.get(5)?,
+                index_used: row.get(6)?,
+            })
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
     /// Detect regressions by comparing current state against history.
     pub fn detect_regressions(
         &self,
@@ -229,7 +257,7 @@ impl StateStore {
                             "Rows scanned increased from ~{} to ~{:.0} ({:.1}x more)",
                             prev,
                             curr,
-                            curr / prev as f64
+                            curr / prev
                         ),
                         current_value: format!("{:.0}", curr),
                         previous_value: format!("{:.0}", prev),

@@ -68,9 +68,12 @@ impl SqlAnalyzer {
         let (security_score, security_issues) =
             crate::security::validator::validate_security(query, &SchemaSnapshot::default());
 
-        let execution_time = start_time.elapsed().as_millis() as u64;
+        // Phase 6: ORM/framework shape detection works standalone (no DB needed).
+        let orm = crate::patterns::orm::detect_orm_patterns(query);
+        recommendations.extend(orm.recommendations);
 
-        Ok(AnalysisResult {
+        // Phase 4: profile-aware ordering/filtering of everything collected so far.
+        let mut result = AnalysisResult {
             query: query.to_string(),
             database_type: db_type,
             profile,
@@ -80,9 +83,15 @@ impl SqlAnalyzer {
             schema_snapshot: None,
             explain_plan: None,
             row_preview: Default::default(),
-            execution_time_ms: execution_time,
+            execution_time_ms: 0,
             regressions: vec![],
-        })
+            schema_drift: vec![],
+        };
+        crate::core::ranking::apply_profile_policy(&mut result);
+
+        result.execution_time_ms = start_time.elapsed().as_millis() as u64;
+
+        Ok(result)
     }
 
     /// Run all schema-dependent detectors: missing index, cartesian product,
@@ -151,9 +160,12 @@ impl SqlAnalyzer {
 
         // Phase 3.6: cost-aware analytics recommendations
         let cost_estimate = crate::core::cost::estimate_query_cost(result);
-        let cost_recs =
+        let mut cost_recs =
             crate::core::cost::generate_analytics_recommendations(&cost_estimate, &result.profile);
-        result.recommendations.extend(cost_recs);
+        result.recommendations.append(&mut cost_recs);
+
+        // Phase 4: re-apply profile policy now that all detectors have contributed.
+        crate::core::ranking::apply_profile_policy(result);
 
         Ok(())
     }

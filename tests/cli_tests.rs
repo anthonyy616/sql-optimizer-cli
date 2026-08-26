@@ -1,4 +1,4 @@
-use sql_optimizer_cli::cli::commands::CommandHandler;
+use sql_optimizer_cli::cli::commands::{CiOptions, CommandHandler};
 use sql_optimizer_cli::cli::ConnectionArgs;
 use sql_optimizer_cli::core::types::{OutputFormat, Profile};
 
@@ -40,6 +40,8 @@ async fn analyze_runs_end_to_end_for_sqlite() {
             None,  // connect_timeout
             Profile::Oltp,
             false, // track
+            None,  // schema_baseline
+            CiOptions::default(),
         )
         .await;
 

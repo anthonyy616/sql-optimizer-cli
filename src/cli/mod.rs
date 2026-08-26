@@ -1,14 +1,15 @@
 pub mod commands;
 pub mod output;
+pub mod tui;
 
-use crate::cli::commands::CommandHandler;
+use crate::cli::commands::{CiOptions, CommandHandler};
 use crate::core::types::*;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-const COMMAND_SHORTCUTS: &[&str] = &["analyze", "batch", "interactive", "schema"];
+const COMMAND_SHORTCUTS: &[&str] = &["analyze", "batch", "interactive", "schema", "scan", "tui"];
 
 pub fn normalize_invocation<I>(args: I) -> Vec<OsString>
 where
@@ -78,6 +79,10 @@ pub struct ConnectionArgs {
 }
 
 impl ConnectionArgs {
+    pub fn has_connection(&self) -> bool {
+        self.db.is_some() || self.db_host.is_some()
+    }
+
     pub fn resolve_connection_string(&self) -> Result<String> {
         if let Some(db) = self.db.as_ref() {
             return Ok(db.clone());
@@ -116,6 +121,71 @@ impl ConnectionArgs {
             "postgresql://{}:{}@{}:{}/{}?sslmode={}",
             encoded_user, encoded_password, formatted_host, port, encoded_name, sslmode
         ))
+    }
+}
+
+/// Phase 7 CI/pipeline flags shared by analyze/batch/scan.
+#[derive(Debug, Clone, Args, Default)]
+pub struct CiArgs {
+    /// Fail (exit code 2) when findings reach this severity: low|medium|high|critical
+    #[arg(long)]
+    pub fail_on: Option<String>,
+
+    /// Emit PR annotations in addition to normal output: github|gitlab|sarif
+    #[arg(long)]
+    pub annotate: Option<String>,
+
+    /// Only report findings that are new relative to this baseline JSON file
+    #[arg(long)]
+    pub baseline: Option<PathBuf>,
+
+    /// Write the current results as the new baseline JSON file
+    #[arg(long)]
+    pub save_baseline: Option<PathBuf>,
+
+    /// Convenience bundle for CI: implies --fail-on high and never prompts
+    #[arg(long)]
+    pub ci: bool,
+}
+
+impl CiArgs {
+    /// Resolve against layered config; CLI flags win over `.sql-optimizer.toml`.
+    fn resolve(&self, cfg: &crate::core::config::ToolConfig) -> Result<CiOptions> {
+        let fail_on_raw = self
+            .fail_on
+            .clone()
+            .or_else(|| cfg.fail_on.clone())
+            .map(|s| s.to_lowercase());
+        // `--ci` is sugar for a flag bundle: fail on high severity by default.
+        let fail_on_raw = if self.ci && fail_on_raw.is_none() {
+            Some("high".to_string())
+        } else {
+            fail_on_raw
+        };
+
+        let fail_on = match fail_on_raw.as_deref() {
+            None => None,
+            Some(s) => Some(Severity::parse(s).ok_or_else(|| {
+                anyhow!("Invalid --fail-on value '{s}'. Use low|medium|high|critical.")
+            })?),
+        };
+
+        let annotate_raw = self.annotate.clone().or_else(|| cfg.annotate.clone());
+        let annotate = match annotate_raw.as_deref() {
+            None => None,
+            Some(s) => Some(
+                crate::core::annotations::AnnotationFormat::parse(s).ok_or_else(|| {
+                    anyhow!("Invalid --annotate value '{s}'. Use github|gitlab|sarif.")
+                })?,
+            ),
+        };
+
+        Ok(CiOptions {
+            fail_on,
+            annotate,
+            baseline: self.baseline.clone(),
+            save_baseline: self.save_baseline.clone(),
+        })
     }
 }
 
@@ -173,6 +243,13 @@ pub enum Commands {
         /// Track query in local state store for regression detection (requires .sql-optimizer/ directory)
         #[arg(long)]
         track: bool,
+
+        /// Diff live schema against this saved snapshot JSON and report drift
+        #[arg(long)]
+        schema_baseline: Option<PathBuf>,
+
+        #[command(flatten)]
+        ci_args: CiArgs,
     },
     /// Interactive mode for multiple queries
     Interactive {
@@ -227,6 +304,13 @@ pub enum Commands {
         /// Connection timeout in seconds
         #[arg(long)]
         connect_timeout: Option<u64>,
+
+        /// Diff live schema against this saved snapshot JSON and report drift
+        #[arg(long)]
+        schema_baseline: Option<PathBuf>,
+
+        #[command(flatten)]
+        ci_args: CiArgs,
     },
     /// Introspect and print database schema
     Schema {
@@ -240,6 +324,10 @@ pub enum Commands {
         /// Connection timeout in seconds
         #[arg(long)]
         connect_timeout: Option<u64>,
+
+        /// Save the introspected snapshot as JSON (usable as --schema-baseline later)
+        #[arg(long)]
+        save: Option<PathBuf>,
     },
     /// Show database health stats (pg_stat_statements, performance_schema, table cardinality)
     Health {
@@ -254,11 +342,58 @@ pub enum Commands {
         #[arg(long)]
         connect_timeout: Option<u64>,
     },
+    /// Scan a project directory (SQL files, migrations, dbt models, app source, slow logs)
+    Scan {
+        /// File or directory to scan
+        path: PathBuf,
+
+        /// Optional database connection — enables schema-aware analysis of every query shape.
+        /// Without it the scan is purely static.
+        #[command(flatten)]
+        connection: ConnectionArgs,
+
+        /// Output format (text, json, yaml)
+        #[arg(short, long, default_value = "text")]
+        output: OutputFormat,
+
+        /// Write the full report to this file instead of stdout (text summary still prints)
+        #[arg(long)]
+        output_file: Option<PathBuf>,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
+
+        /// Diff live schema against this saved snapshot JSON and report drift
+        #[arg(long)]
+        schema_baseline: Option<PathBuf>,
+
+        #[command(flatten)]
+        ci_args: CiArgs,
+    },
+    /// Launch the interactive TUI dashboard (requires a terminal)
+    Tui {
+        #[command(flatten)]
+        connection: ConnectionArgs,
+
+        /// Force simple queries (avoid prepared statements)
+        #[arg(long)]
+        simple_mode: bool,
+
+        /// Connection timeout in seconds
+        #[arg(long)]
+        connect_timeout: Option<u64>,
+    },
 }
 
 impl Cli {
-    pub async fn execute(&self) -> anyhow::Result<()> {
+    pub async fn execute(&self) -> Result<i32> {
         let handler = CommandHandler::new();
+        let cfg = crate::core::config::ToolConfig::load().unwrap_or_default();
 
         match &self.command {
             Commands::Analyze {
@@ -271,7 +406,10 @@ impl Cli {
                 simple_mode,
                 connect_timeout,
                 track,
+                schema_baseline,
+                ci_args,
             } => {
+                let ci = ci_args.resolve(&cfg)?;
                 handler
                     .handle_analyze(
                         query,
@@ -285,6 +423,8 @@ impl Cli {
                         *connect_timeout,
                         self.profile.clone(),
                         *track,
+                        schema_baseline.clone(),
+                        ci,
                     )
                     .await
             }
@@ -317,7 +457,10 @@ impl Cli {
                 output,
                 simple_mode,
                 connect_timeout,
+                schema_baseline,
+                ci_args,
             } => {
+                let ci = ci_args.resolve(&cfg)?;
                 handler
                     .handle_batch(
                         input,
@@ -327,6 +470,8 @@ impl Cli {
                         *simple_mode,
                         *connect_timeout,
                         self.profile.clone(),
+                        schema_baseline.clone(),
+                        ci,
                     )
                     .await
             }
@@ -334,9 +479,10 @@ impl Cli {
                 connection,
                 simple_mode,
                 connect_timeout,
+                save,
             } => {
                 handler
-                    .handle_schema(connection, *simple_mode, *connect_timeout)
+                    .handle_schema(connection, *simple_mode, *connect_timeout, save.clone())
                     .await
             }
             Commands::Health {
@@ -346,6 +492,41 @@ impl Cli {
             } => {
                 handler
                     .handle_health(connection, *simple_mode, *connect_timeout)
+                    .await
+            }
+            Commands::Scan {
+                path,
+                connection,
+                output,
+                output_file,
+                simple_mode,
+                connect_timeout,
+                schema_baseline,
+                ci_args,
+            } => {
+                let ci = ci_args.resolve(&cfg)?;
+                let exclude = cfg.exclude.clone().unwrap_or_default();
+                handler
+                    .handle_scan(
+                        path,
+                        connection,
+                        output.clone(),
+                        output_file.clone(),
+                        *simple_mode,
+                        *connect_timeout,
+                        self.profile.clone(),
+                        exclude,
+                        schema_baseline.clone(),
+                        ci,
+                    )
+                    .await
+            }
+            Commands::Tui {
+                connection,
+                simple_mode,
+                connect_timeout,
+            } => {
+                crate::cli::tui::run_tui(connection, *simple_mode, *connect_timeout, self.verbose)
                     .await
             }
         }

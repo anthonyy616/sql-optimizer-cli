@@ -97,6 +97,18 @@ pub struct AnalysisResult {
     pub execution_time_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regressions: Vec<RegressionInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schema_drift: Vec<SchemaDriftItem>,
+}
+
+/// A single schema change detected between a stored baseline snapshot and the live schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SchemaDriftItem {
+    /// e.g. "index-dropped", "index-added", "column-dropped", "column-added",
+    /// "column-type-changed", "table-dropped", "table-added"
+    pub kind: String,
+    pub table: String,
+    pub detail: String,
 }
 
 /// Regression info serialized into JSON output.
@@ -143,13 +155,43 @@ impl std::fmt::Display for ConfidenceTier {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RecommendationType {
     MissingIndex,
     NPlusOneQuery,
     InefficientJoin,
     CartesianProduct,
     QueryRewrite,
+}
+
+impl RecommendationType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            RecommendationType::MissingIndex => "missing_index",
+            RecommendationType::NPlusOneQuery => "n_plus_one",
+            RecommendationType::InefficientJoin => "inefficient_join",
+            RecommendationType::CartesianProduct => "cartesian_product",
+            RecommendationType::QueryRewrite => "query_rewrite",
+        }
+    }
+}
+
+impl AnalysisResult {
+    /// The worst severity among security issues in this result, if any.
+    pub fn max_severity(&self) -> Option<Severity> {
+        self.security_issues
+            .iter()
+            .map(|i| i.severity.clone())
+            .max_by(|a, b| a.rank().cmp(&b.rank()))
+    }
+
+    /// True if the result carries any finding worth reporting.
+    pub fn has_findings(&self) -> bool {
+        !self.security_issues.is_empty()
+            || !self.recommendations.is_empty()
+            || !self.regressions.is_empty()
+            || !self.schema_drift.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,12 +209,54 @@ pub enum SecurityIssueType {
     PrivilegeEscalation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Low,
     Medium,
     High,
     Critical,
+}
+
+impl SecurityIssue {
+    pub fn issue_type_name(&self) -> &'static str {
+        match self.issue_type {
+            SecurityIssueType::SqlInjection => "sql_injection",
+            SecurityIssueType::SensitiveDataExposure => "sensitive_data_exposure",
+            SecurityIssueType::PrivilegeEscalation => "privilege_escalation",
+        }
+    }
+}
+
+impl Severity {
+    /// Numeric rank for comparisons (higher = more severe).
+    pub fn rank(&self) -> u8 {
+        match self {
+            Severity::Low => 0,
+            Severity::Medium => 1,
+            Severity::High => 2,
+            Severity::Critical => 3,
+        }
+    }
+
+    /// Parse a severity name (case-insensitive). Used by `--fail-on` and config.
+    pub fn parse(s: &str) -> Option<Severity> {
+        match s.trim().to_lowercase().as_str() {
+            "low" => Some(Severity::Low),
+            "medium" => Some(Severity::Medium),
+            "high" => Some(Severity::High),
+            "critical" => Some(Severity::Critical),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Critical => "critical",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

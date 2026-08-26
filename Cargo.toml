@@ -14,7 +14,8 @@ categories = ["command-line-utilities", "development-tools"]
 clap = { version = "4.4", features = ["derive", "env"] }
 dialoguer = "0.11"
 indicatif = "0.17"
-crossterm = "0.27"
+crossterm = "0.28"
+ratatui = "0.29"
 async-trait = "0.1"
 
 # SQL Parsing
@@ -54,6 +55,7 @@ tabled = "0.15"
 
 # Configuration
 config = "0.13"
+toml = "0.8"
 dirs = "5.0"
 dotenvy = "0.15"
 

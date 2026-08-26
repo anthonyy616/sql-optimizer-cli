@@ -69,8 +69,7 @@ pub fn detect_orm_patterns(query: &str) -> OrmAnalysis {
         // Over-fetch: ORM star-select or all-column select pulls every column.
         let over_fetches = normalized.contains(".* ")
             || normalized.contains("select * ")
-            || count_pattern(&normalized, "t0.\"") >= 5  // Prisma positional-alias columns
-            || count_pattern(&normalized, \", \"") >= 5; // quoted column lists
+            || count_pattern(&normalized, "t0.\"") >= 5 // Prisma positional-alias columns
         if over_fetches {
             recommendations.push(Recommendation {
                 recommendation_type: RecommendationType::QueryRewrite,

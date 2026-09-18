@@ -50,5 +50,5 @@ async fn flags_basic_security_keywords() {
     assert!(result
         .security_issues
         .iter()
-        .any(|issue| issue.description.contains("union select")));
+        .any(|issue| issue.description.contains("UNION SELECT")));
 }

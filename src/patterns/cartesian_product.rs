@@ -22,15 +22,19 @@ pub fn detect_cartesian_product(query: &str, _schema: &SchemaSnapshot) -> Vec<Re
                 let mut has_join_condition = false;
                 let mut has_cross_join = false;
 
-                // Count tables in FROM clause
-                match &select.from[0].relation {
-                    TableFactor::Table { .. } => table_count += 1,
-                    TableFactor::Derived { .. } => table_count += 1,
-                    _ => {}
+                // Count every comma-separated FROM item. sqlparser puts extra
+                // comma-separated relations into `from` itself (not `joins`),
+                // e.g. `SELECT * FROM users, orders` yields from.len() == 2.
+                for from_item in &select.from {
+                    match &from_item.relation {
+                        TableFactor::Table { .. } => table_count += 1,
+                        TableFactor::Derived { .. } => table_count += 1,
+                        _ => {}
+                    }
                 }
 
                 // Check JOINs
-                for join in &select.from[0].joins {
+                for join in select.from.iter().flat_map(|f| &f.joins) {
                     table_count += 1;
                     match &join.join_operator {
                         JoinOperator::Inner(constraint)

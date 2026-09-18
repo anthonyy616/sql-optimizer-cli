@@ -29,6 +29,31 @@ cd sql-optimizer-cli
 
 The install script puts `sql-optimizer-cli` on your PATH and creates shortcut commands named `analyze`, `batch`, `interactive`, `schema`, `scan`, and `tui`. During local development use `cargo run --bin sql-optimizer-cli -- ...`.
 
+### Run it without installing: `scripts/env.sh`
+
+Don't want to install anything? Source one file to get `$BIN` (absolute path to
+the debug binary) plus a `sqlopt` shortcut function in your current shell:
+
+```bash
+source scripts/env.sh          # builds the binary first if it's missing
+
+$BIN schema --db sqlite::memory:
+sqlopt analyze "SELECT 1" --db sqlite::memory:
+sqlopt-rebuild                 # rebuild after code changes
+
+# Make `sqlopt` available in every new shell (no rc-file editing):
+source scripts/env.sh --install   # copies launcher to ~/.local/bin
+```
+
+To keep `$BIN`/`sqlopt` across sessions, add the source line to your shell rc:
+`echo 'source "$HOME/path/to/sql-optimizer-cli/scripts/env.sh"' >> ~/.zshrc`
+(requires bash or zsh; plain `sh`/dash does not support the functions).
+
+The rest of this README uses `$BIN` in examples — with `env.sh` sourced, or
+after `./scripts/install.sh`, just substitute your preferred way of invoking
+the binary (`sql-optimizer-cli`, `sqlopt`, or `cargo run --bin
+sql-optimizer-cli --`).
+
 ## Quick Start
 
 Two connection styles:
@@ -50,21 +75,21 @@ For Supabase prefer the session pooler connection string, and add `--simple-mode
 
 ```bash
 # Smoke test: render the schema tree
-sql-optimizer-cli schema --db "$SQL_OPTIMIZER_DB_URL"
+$BIN schema --db "$SQL_OPTIMIZER_DB_URL"
 
 # Analyze a query with plan + fix suggestions
-sql-optimizer-cli analyze \
+$BIN analyze \
   "SELECT u.*, o.total FROM users u JOIN orders o ON u.id = o.user_id" \
   --db postgresql://user:pass@localhost:5432/mydb --explain
 
 # Health snapshot (top queries by time, table sizes)
-sql-optimizer-cli health --db "$SQL_OPTIMIZER_DB_URL"
+$BIN health --db "$SQL_OPTIMIZER_DB_URL"
 
 # Scan a whole project: .sql files, dbt models, app source, slow logs
-sql-optimizer-cli scan ./migrations --db "$SQL_OPTIMIZER_DB_URL" --output json
+$BIN scan ./migrations --db "$SQL_OPTIMIZER_DB_URL" --output json
 
 # Full-screen dashboard
-sql-optimizer-cli tui --db "$SQL_OPTIMIZER_DB_URL"
+$BIN tui --db "$SQL_OPTIMIZER_DB_URL"
 ```
 
 ## Command Reference
@@ -89,7 +114,7 @@ Every connection-related flag also reads its `SQL_OPTIMIZER_DB_*` environment eq
 Analyze a single SQL query.
 
 ```bash
-sql-optimizer-cli analyze <QUERY> [shared flags] [--explain] [--show-rows] [--row-limit N] \
+$BIN analyze <QUERY> [shared flags] [--explain] [--show-rows] [--row-limit N] \
   [--output text|json|yaml|markdown] [--track] [--schema-baseline <FILE>] [CI flags]
 ```
 
@@ -106,7 +131,7 @@ sql-optimizer-cli analyze <QUERY> [shared flags] [--explain] [--show-rows] [--ro
 Process multiple queries from a file.
 
 ```bash
-sql-optimizer-cli batch --input queries.sql [--output-file FILE] [-o FORMAT] [shared flags] [CI flags]
+$BIN batch --input queries.sql [--output-file FILE] [-o FORMAT] [shared flags] [CI flags]
 ```
 
 With a non-text `--output` and no explicit output file, results are auto-written under `output/`.
@@ -116,7 +141,7 @@ With a non-text `--output` and no explicit output file, results are auto-written
 Scan a file or directory: raw `.sql` files, migration files, dbt models (Jinja `{{ ref() }}` stripped best-effort), application source containing embedded SQL, and Postgres/MySQL log formats. Queries are fingerprinted and deduplicated; the report surfaces top offenders with origin file/line. Never prompts — safe for CI.
 
 ```bash
-sql-optimizer-cli scan <PATH> [shared flags] [-o FORMAT] [--output-file FILE] [--schema-baseline FILE] [CI flags]
+$BIN scan <PATH> [shared flags] [-o FORMAT] [--output-file FILE] [--schema-baseline FILE] [CI flags]
 ```
 
 Exclusions come from `exclude` in `.sql-optimizer.toml`.
@@ -126,7 +151,7 @@ Exclusions come from `exclude` in `.sql-optimizer.toml`.
 Introspect and print the schema as a tree (tables → columns → indexes → FKs).
 
 ```bash
-sql-optimizer-cli schema [shared flags] [--save <FILE>]
+$BIN schema [shared flags] [--save <FILE>]
 ```
 
 `--save <FILE>` writes the snapshot JSON, which can later be passed to `--schema-baseline` for drift detection.
@@ -136,7 +161,7 @@ sql-optimizer-cli schema [shared flags] [--save <FILE>]
 Point-in-time DB health snapshot: top queries by total time (`pg_stat_statements` / `performance_schema`) and table cardinality. If the extension or privilege isn't available, the command still succeeds and says so explicitly — it is not a monitoring daemon.
 
 ```bash
-sql-optimizer-cli health [shared flags]
+$BIN health [shared flags]
 ```
 
 ### `interactive`
@@ -144,7 +169,7 @@ sql-optimizer-cli health [shared flags]
 Classic line-based interactive session; keeps one connection open for the session.
 
 ```bash
-sql-optimizer-cli interactive [shared flags] [--history ~/.sql-optimizer-history] [--show-rows] [-o FORMAT]
+$BIN interactive [shared flags] [--history ~/.sql-optimizer-history] [--show-rows] [-o FORMAT]
 ```
 
 ### `tui`
@@ -157,6 +182,10 @@ Full-screen terminal dashboard with four panels:
 - **History** — press `r` to list recent tracked runs from the local state store
 
 Keys: `Tab`/`←→` switch panels, `↑↓` scroll, `q`/`Esc` quit. Requires a working database connection and a real terminal.
+
+```bash
+$BIN tui --db "$SQL_OPTIMIZER_DB_URL"
+```
 
 ## CI / Pipeline Usage
 

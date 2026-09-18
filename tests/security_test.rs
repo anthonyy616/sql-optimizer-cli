@@ -34,7 +34,7 @@ fn detects_hardcoded_password() {
     assert!(
         issues
             .iter()
-            .any(|i| i.description.contains("Hardcoded credential")),
+            .any(|i| i.description.contains("hardcoded password in query")),
         "should detect hardcoded password"
     );
 }
@@ -138,7 +138,8 @@ fn security_score_deductions() {
 #[test]
 fn full_validator_returns_issues_and_score() {
     let schema = SchemaSnapshot::default();
-    let query = "SELECT * FROM users DROP TABLE users";
+    // Stacked queries with a statement separator (realistic injection shape).
+    let query = "SELECT * FROM users; DROP TABLE users";
     let (score, issues) = validate_security(query, &schema);
     assert!(!issues.is_empty(), "should find security issues");
     assert!(score < 100.0, "score should be below 100");

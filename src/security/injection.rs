@@ -8,6 +8,13 @@ pub fn detect_injection_risks(query: &str) -> Vec<SecurityIssue> {
     let query_lower = query.to_lowercase();
 
     // 1. String concatenation patterns — the most common injection vector
+    //    Both orders are vectors: "'literal' + input" and "input + 'literal'".
+    check_pattern(
+        &mut issues,
+        query,
+        r#"['"]\s*\+"#,
+        "string concatenation with '+' operator",
+    );
     check_pattern(
         &mut issues,
         query,
@@ -81,7 +88,14 @@ pub fn detect_injection_risks(query: &str) -> Vec<SecurityIssue> {
     ];
 
     for (pattern, severity) in &dangerous_ddl {
-        if query_lower.starts_with(pattern) || query_lower.contains(&format!("\n{}", pattern)) {
+        // Match at statement start, after a newline, or after a statement
+        // separator (';') so mid-query stacked DDL like
+        // "SELECT ...; DROP TABLE x" is caught too.
+        let mid_query = format!("; {}", pattern);
+        if query_lower.starts_with(pattern)
+            || query_lower.contains(&format!("\n{}", pattern))
+            || query_lower.contains(&mid_query)
+        {
             issues.push(SecurityIssue {
                 issue_type: SecurityIssueType::PrivilegeEscalation,
                 description: format!("Potentially dangerous DDL/privilege operation: {}", pattern),

@@ -11,14 +11,15 @@ use std::path::{Path, PathBuf};
 
 const COMMAND_SHORTCUTS: &[&str] = &["analyze", "batch", "interactive", "schema", "scan", "tui"];
 
+/// Flags that must keep their clap meaning when passed as the first argument
+/// (they should NOT trigger the default-to-tui behavior).
+const HELP_VERSION_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
+
 pub fn normalize_invocation<I>(args: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = OsString>,
 {
     let mut args: Vec<OsString> = args.into_iter().collect();
-    if args.len() < 2 {
-        return args;
-    }
 
     let program_name = args
         .first()
@@ -26,20 +27,36 @@ where
         .and_then(OsStr::to_str)
         .unwrap_or_default();
 
-    if !COMMAND_SHORTCUTS.contains(&program_name) {
-        return args;
-    }
-
     let first_argument = args
         .get(1)
         .and_then(|value| value.to_str())
         .unwrap_or_default();
 
-    if first_argument == program_name {
-        return args;
-    }
+    // Decide whether to inject a subcommand after the program name, and which one.
+    //
+    // 1. Shortcut binaries (analyze, batch, interactive, schema, scan, tui):
+    //    inject the program's own name as the subcommand unless it is already
+    //    the first argument.
+    // 2. Any other invocation that clearly lacks a subcommand — a bare call
+    //    (`sql-optimizer-cli`) or a flags-only call (`sql-optimizer-cli --db ...`)
+    //    — defaults to the interactive TUI dashboard.
+    let injected: Option<&str> = if COMMAND_SHORTCUTS.contains(&program_name) {
+        if args.len() >= 2 && first_argument != program_name {
+            Some(program_name)
+        } else {
+            None
+        }
+    } else {
+        let lacks_subcommand = args.len() == 1
+            || (args.len() >= 2
+                && first_argument.starts_with('-')
+                && !HELP_VERSION_FLAGS.contains(&first_argument));
+        lacks_subcommand.then_some("tui")
+    };
 
-    args.insert(1, OsString::from(program_name));
+    if let Some(subcommand) = injected {
+        args.insert(1, OsString::from(subcommand));
+    }
     args
 }
 
@@ -560,6 +577,52 @@ mod tests {
             OsString::from("analyze"),
             OsString::from("SELECT 1"),
         ];
+
+        let normalized = normalize_invocation(args.clone());
+
+        assert_eq!(normalized, args);
+    }
+
+    #[test]
+    fn defaults_bare_invocation_to_tui() {
+        let args = vec![OsString::from("sql-optimizer-cli")];
+
+        let normalized = normalize_invocation(args);
+
+        assert_eq!(normalized[1], OsString::from("tui"));
+    }
+
+    #[test]
+    fn defaults_flags_only_invocation_to_tui() {
+        let args = vec![
+            OsString::from("sql-optimizer-cli"),
+            OsString::from("--db"),
+            OsString::from("sqlite://demo.db"),
+        ];
+
+        let normalized = normalize_invocation(args);
+
+        assert_eq!(normalized[1], OsString::from("tui"));
+        assert_eq!(normalized[2], OsString::from("--db"));
+    }
+
+    #[test]
+    fn keeps_help_and_version_flags_as_first_argument() {
+        for flag in ["-h", "--help", "-V", "--version"] {
+            let args = vec![
+                OsString::from("sql-optimizer-cli"),
+                OsString::from(flag),
+            ];
+
+            let normalized = normalize_invocation(args.clone());
+
+            assert_eq!(normalized, args, "flag {flag} must not get a tui prefix");
+        }
+    }
+
+    #[test]
+    fn bare_shortcut_binary_is_left_unchanged() {
+        let args = vec![OsString::from("tui")];
 
         let normalized = normalize_invocation(args.clone());
 

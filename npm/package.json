@@ -1,0 +1,43 @@
+{
+  "name": "sql-optimizer-cli",
+  "version": "0.1.0",
+  "description": "Intelligent SQL query optimization advisor for PostgreSQL, MySQL, and SQLite — with a full-screen TUI dashboard",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthonyy616/sql-optimizer-cli.git"
+  },
+  "keywords": [
+    "sql",
+    "database",
+    "optimization",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "tui",
+    "cli"
+  ],
+  "bin": {
+    "sql-optimizer-cli": "bin/cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "optionalDependencies": {
+    "sql-optimizer-cli-darwin-arm64": "0.1.0",
+    "sql-optimizer-cli-darwin-x64": "0.1.0",
+    "sql-optimizer-cli-linux-arm64": "0.1.0",
+    "sql-optimizer-cli-linux-x64": "0.1.0"
+  }
+}

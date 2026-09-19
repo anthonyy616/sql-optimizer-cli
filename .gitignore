@@ -78,6 +78,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Generated npm platform packages (created by scripts/release-npm.sh)
+npm/platform/
+
 # Performance profiling
 perf.data
 *.perf

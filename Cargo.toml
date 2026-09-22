@@ -66,6 +66,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Async utilities
 futures = "0.3"
 
+# Vendor OpenSSL statically on Linux so the musl release targets build without
+# a system OpenSSL (native-tls links openssl-sys there; macOS uses Security.framework).
+# NOTE: target-specific tables must come after the complete [dependencies] list —
+# a new table header ends the section.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 tempfile = "3.8"
 mockall = "0.12"

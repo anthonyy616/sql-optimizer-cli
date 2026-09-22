@@ -45,13 +45,15 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross (Linux musl targets)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: contains(matrix.target, 'musl')
         run: cargo install cross --locked
 
       - name: Build
         run: |
           rustup target add ${{ matrix.target }}
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+          if [[ "${{ matrix.target }}" == *musl* ]]; then
+            # cross runs the build inside a container with musl-gcc, perl and
+            # make — required for the vendored OpenSSL in Cargo.toml.
             cross build --release --target ${{ matrix.target }}
           else
             cargo build --release --target ${{ matrix.target }}

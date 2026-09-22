@@ -52,7 +52,12 @@ for entry in "${TARGETS[@]}"; do
   echo "==> Building $target"
   rustup target add "$target" 2>/dev/null || true
   if [[ "$target" == *musl* ]]; then
-    cargo build --release --target "$target"
+    # musl targets need cross (musl-gcc + perl for vendored OpenSSL)
+    if ! command -v cross >/dev/null 2>&1; then
+      echo "musl target needs 'cross' — install with: cargo install cross --locked" >&2
+      exit 1
+    fi
+    cross build --release --target "$target"
   else
     # Fall back to plain cargo when building the host's own darwin target.
     cargo build --release --target "$target" 2>/dev/null || cargo build --release

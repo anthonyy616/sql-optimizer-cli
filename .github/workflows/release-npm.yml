@@ -93,6 +93,12 @@ jobs:
           # package.json in place and publish from there.
           for dir in sql-optimizer-cli-*; do
             suffix="${dir#sql-optimizer-cli-}"
+            # Skip versions already on npm so tag re-runs are idempotent
+            # (published versions are immutable).
+            if npm view "sql-optimizer-cli-${suffix}@${VERSION}" version >/dev/null 2>&1; then
+              echo "sql-optimizer-cli-${suffix}@${VERSION} already published — skipping"
+              continue
+            fi
             chmod +x "$dir/sql-optimizer-cli"
             case "$suffix" in
               darwin-arm64) os=darwin; cpu=arm64 ;;
@@ -122,5 +128,11 @@ jobs:
         run: |
           VERSION="${VERSION#v}"
           cd npm
-          npm version "$VERSION" --no-git-tag-version
-          npm publish --access public
+          # npm pkg set (unlike npm version) does not error when the value is
+          # unchanged — the wrapper may already carry this version.
+          npm pkg set version="$VERSION"
+          if npm view "sql-optimizer-cli@$VERSION" version >/dev/null 2>&1; then
+            echo "sql-optimizer-cli@$VERSION already published — skipping"
+          else
+            npm publish --access public
+          fi

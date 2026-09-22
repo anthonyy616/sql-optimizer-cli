@@ -88,21 +88,21 @@ jobs:
         run: |
           VERSION="${VERSION#v}"
           cd artifacts
+          # Each artifact dir IS the platform package dir (named
+          # sql-optimizer-cli-<suffix>, containing the binary) — write the
+          # package.json in place and publish from there.
           for dir in sql-optimizer-cli-*; do
             suffix="${dir#sql-optimizer-cli-}"
-            pkg_name="sql-optimizer-cli-${suffix}"
-            mkdir -p "$pkg_name"
-            cp "$dir/sql-optimizer-cli" "$pkg_name/sql-optimizer-cli"
-            chmod +x "$pkg_name/sql-optimizer-cli"
+            chmod +x "$dir/sql-optimizer-cli"
             case "$suffix" in
               darwin-arm64) os=darwin; cpu=arm64 ;;
               darwin-x64)   os=darwin; cpu=x64 ;;
               linux-x64)    os=linux;  cpu=x64 ;;
               linux-arm64)  os=linux;  cpu=arm64 ;;
             esac
-            cat > "$pkg_name/package.json" <<EOF
+            cat > "$dir/package.json" <<EOF
           {
-            "name": "$pkg_name",
+            "name": "sql-optimizer-cli-${suffix}",
             "version": "$VERSION",
             "description": "Prebuilt sql-optimizer-cli binary for ${os}-${cpu}",
             "license": "MIT",
@@ -112,7 +112,7 @@ jobs:
             "files": ["sql-optimizer-cli"]
           }
           EOF
-            (cd "$pkg_name" && npm publish --access public)
+            (cd "$dir" && npm publish --access public)
           done
 
       - name: Publish wrapper package

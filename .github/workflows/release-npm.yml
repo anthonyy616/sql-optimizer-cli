@@ -44,9 +44,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cross
+            target/${{ matrix.target }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
       - name: Install cross (Linux musl targets)
         if: contains(matrix.target, 'musl')
-        run: cargo install cross --locked
+        run: |
+          if [[ ! -x "$HOME/.cargo/bin/cross" ]]; then
+            cargo install cross --locked
+          fi
 
       - name: Build
         run: |

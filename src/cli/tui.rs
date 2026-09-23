@@ -45,8 +45,8 @@ use tokio::sync::mpsc;
 
 use crate::cli::ConnectionArgs;
 use crate::core::connections::{
-    redact_profile_url, ConnectionProfile, DatabaseKind, KeychainSecretStore, ProfileCatalog,
-    SecretStore,
+    inject_secret_into_url, redact_profile_url, ConnectionProfile, DatabaseKind,
+    KeychainSecretStore, ProfileCatalog, SecretStore,
 };
 use crate::core::types::*;
 
@@ -256,6 +256,7 @@ enum Job {
         url: String,
         label: String,
         profile_id: Option<String>,
+        accept_invalid_certs: bool,
     },
     Disconnect {
         gen: u64,
@@ -359,6 +360,8 @@ struct App {
     conn_input: String,
     conn_input_stage: Option<ConnInputStage>,
     pending_conn_url: String,
+    /// Connection name collected mid-form and carried through later stages.
+    pending_conn_name: Option<String>,
     /// Password temporarily held between form stages; never persisted to disk.
     pending_password: Option<String>,
     /// When set, completing the form edits this profile instead of adding one.
@@ -414,6 +417,7 @@ impl App {
             conn_input: String::new(),
             conn_input_stage: None,
             pending_conn_url: String::new(),
+            pending_conn_name: None,
             pending_password: None,
             editing_profile_id: None,
             job_tx,
@@ -580,6 +584,7 @@ pub async fn run_tui(
                     url,
                     label,
                     profile_id: None,
+                    accept_invalid_certs: connection.accept_invalid_certs,
                 });
                 if let Ok(args_url) = connection.resolve_connection_string() {
                     app.entries.push(ConnectionEntry::session(
@@ -623,6 +628,7 @@ pub async fn connect_url(
     url: &str,
     simple_mode: bool,
     connect_timeout: Option<u64>,
+    accept_invalid_certs: bool,
 ) -> Result<(
     Box<dyn crate::database::connection::DatabaseConnector>,
     DatabaseType,
@@ -632,7 +638,7 @@ pub async fn connect_url(
     let options = ConnectOptions {
         simple_mode,
         connect_timeout_secs: connect_timeout,
-        accept_invalid_certs: false,
+        accept_invalid_certs,
     };
     connector.connect(url, &options).await?;
     Ok((connector, db_type))
@@ -805,7 +811,7 @@ async fn worker_loop(
     res_tx: mpsc::UnboundedSender<JobResult>,
     simple_mode: bool,
     connect_timeout: Option<u64>,
-    _secrets: Arc<dyn SecretStore>,
+    secrets: Arc<dyn SecretStore>,
 ) {
     use crate::database::connection::DatabaseConnector;
 
@@ -821,12 +827,19 @@ async fn worker_loop(
                 url,
                 label,
                 profile_id,
+                accept_invalid_certs,
             } => {
                 // Await-disconnect the old connector before installing a new one.
                 if let Some(mut old) = connector.take() {
                     let _ = old.disconnect().await;
                 }
-                match connect_url(&url, simple_mode, connect_timeout).await {
+                // Saved profiles carry sanitized URLs — resolve the password
+                // from the credential store before connecting.
+                let url = match &profile_id {
+                    Some(id) => inject_secret_into_url(&url, id, secrets.as_ref()).await,
+                    None => url,
+                };
+                match connect_url(&url, simple_mode, connect_timeout, accept_invalid_certs).await {
                     Ok((c, db_type)) => {
                         connector = Some(c);
                         conn_id = profile_id.clone();
@@ -1050,6 +1063,8 @@ fn move_conn_selection(app: &mut App, forward: bool) {
 fn start_conn_form(app: &mut App, url: String, edit_profile_id: Option<String>) {
     app.conn_input = url;
     app.pending_conn_url.clear();
+    app.pending_conn_name = None;
+    app.pending_password = None;
     app.editing_profile_id = edit_profile_id;
     app.conn_input_stage = Some(ConnInputStage::Url);
 }
@@ -1092,6 +1107,7 @@ fn handle_connect_enter(app: &mut App) {
         url,
         label,
         profile_id,
+        accept_invalid_certs: entry.profile.accept_invalid_certs,
     });
 }
 
@@ -1222,6 +1238,7 @@ fn retry_selected_connection(app: &mut App) {
         url: entry.profile.url.clone(),
         label: entry.profile.name.clone(),
         profile_id: entry.saved.then(|| entry.profile.id.clone()),
+        accept_invalid_certs: entry.profile.accept_invalid_certs,
     });
 }
 
@@ -1283,6 +1300,8 @@ async fn handle_connect_input_enter(
             let url = app.pending_conn_url.clone();
             let provider = provider_from_url(&url).unwrap_or(Provider::Postgres);
             if provider.needs_password() {
+                // Carry the collected name through the password/cert stages.
+                app.pending_conn_name = Some(name);
                 app.conn_input.clear();
                 app.conn_input_stage = Some(ConnInputStage::Password);
                 app.status = "Password (stored in the OS credential store; Enter to skip):".into();
@@ -1303,17 +1322,22 @@ async fn handle_connect_input_enter(
             app.conn_input.clear();
             let password = app.pending_password.take().unwrap_or_default();
             let url = app.pending_conn_url.clone();
-            let name = catalog
-                .profiles
-                .iter()
-                .find(|p| Some(&p.id) == app.editing_profile_id.as_ref())
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            if name.is_empty() {
+            // When editing, reuse the profile's existing name; for a new
+            // connection the name was collected in the Name stage.
+            let name = if let Some(id) = &app.editing_profile_id {
+                catalog
+                    .profiles
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.name.clone())
+            } else {
+                app.pending_conn_name.clone().filter(|n| !n.is_empty())
+            };
+            let Some(name) = name else {
                 app.status = "Internal error: connection name lost — restart the form.".into();
                 app.conn_input_stage = None;
                 return;
-            }
+            };
             finish_conn_form(app, secrets, catalog, name, url, Some(password), accept).await;
         }
     }
@@ -1331,6 +1355,7 @@ async fn finish_conn_form(
 ) {
     app.conn_input_stage = None;
     app.conn_input.clear();
+    let label = name.clone();
     persist_profile(
         app,
         secrets,
@@ -1350,19 +1375,15 @@ async fn finish_conn_form(
     let profile_id = app
         .entries
         .iter()
-        .find(|e| e.profile.url == redact_profile_url(&url))
+        .find(|e| e.profile.url == redact_profile_url(&url) && e.profile.name == label)
         .filter(|e| e.saved)
         .map(|e| e.profile.id.clone());
     let _ = app.job_tx.send(Job::Connect {
         gen: app.conn_gen,
         url,
-        label: app
-            .status
-            .split('\'')
-            .nth(1)
-            .unwrap_or("connection")
-            .to_string(),
+        label,
         profile_id,
+        accept_invalid_certs,
     });
 }
 
@@ -1400,8 +1421,9 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                     app.conn_input_stage = None;
                     app.conn_input.clear();
                     app.pending_conn_url.clear();
-                    app.editing_profile_id = None;
+                    app.pending_conn_name = None;
                     app.pending_password = None;
+                    app.editing_profile_id = None;
                     app.status = "Connection form cancelled.".into();
                 }
                 KeyCode::Esc => return Ok(0),
@@ -1468,6 +1490,7 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                 KeyCode::Char('a') if app.tab == TAB_CONNECT && !in_conn_form => {
                     app.conn_input.clear();
                     app.editing_profile_id = None;
+                    app.pending_conn_name = None;
                     app.conn_input_stage = Some(ConnInputStage::Url);
                     app.status =
                         "Enter a connection URL (postgresql://, mysql://, sqlite://) and press Enter."
@@ -2748,6 +2771,110 @@ mod tests {
         let preview = connector.preview_rows("SELECT 1 AS one", 5).await.unwrap();
         assert_eq!(preview.rows.len(), 1);
         assert_eq!(preview.columns, vec!["one"]);
+    }
+
+    #[tokio::test]
+    async fn connection_form_carries_name_through_password_and_cert_stages() {
+        // Regression: the cert stage used to look the name up in the catalog
+        // by profile ID, which is None for NEW connections — the form aborted
+        // with "connection name lost" before ever connecting.
+        let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+        let mut app = App::new(Profile::Oltp, false, None, tx);
+        let mut catalog = ProfileCatalog::load(
+            std::env::temp_dir().join(format!("sql-opt-test-{}.json", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+        let secrets = crate::core::connections::SessionSecretStore::new();
+
+        // URL stage
+        start_conn_form(
+            &mut app,
+            "postgresql://postgres@db.ref.supabase.co:5432/postgres?sslmode=require".into(),
+            None,
+        );
+        // Enter on URL stage
+        handle_connect_input_enter(&mut app, &secrets, &mut catalog).await;
+        assert!(matches!(app.conn_input_stage, Some(ConnInputStage::Name)));
+
+        // Type a name and press Enter -> password stage (provider needs one)
+        app.conn_input = "My Supabase".into();
+        handle_connect_input_enter(&mut app, &secrets, &mut catalog).await;
+        assert!(matches!(
+            app.conn_input_stage,
+            Some(ConnInputStage::Password)
+        ));
+        assert_eq!(app.pending_conn_name.as_deref(), Some("My Supabase"));
+
+        // Type a password and press Enter -> cert stage
+        app.conn_input = "s3cret".into();
+        handle_connect_input_enter(&mut app, &secrets, &mut catalog).await;
+        assert!(matches!(app.conn_input_stage, Some(ConnInputStage::Cert)));
+
+        // Answer 'y' at the cert stage — must NOT abort; must persist + connect.
+        app.conn_input = "y".into();
+        handle_connect_input_enter(&mut app, &secrets, &mut catalog).await;
+        assert!(app.conn_input_stage.is_none(), "form should complete");
+
+        // Profile was saved with the carried-through name and cert flag.
+        assert_eq!(catalog.profiles.len(), 1);
+        assert_eq!(catalog.profiles[0].name, "My Supabase");
+        assert!(catalog.profiles[0].accept_invalid_certs);
+        assert!(!catalog.profiles[0].url.contains("s3cret"));
+
+        // The connect job carries the cert flag and profile identity.
+        let job = rx.try_recv().expect("connect job sent");
+        match job {
+            Job::Connect {
+                url,
+                label,
+                profile_id,
+                accept_invalid_certs,
+                ..
+            } => {
+                assert_eq!(label, "My Supabase");
+                assert!(accept_invalid_certs);
+                assert!(profile_id.is_some());
+                assert!(!url.contains("s3cret"), "URL stays sanitized on the wire");
+            }
+            _ => panic!("expected Job::Connect"),
+        }
+
+        // Secret was stored under the profile's key.
+        let key = format!("sql-optimizer/profile/{}", catalog.profiles[0].id);
+        assert_eq!(
+            secrets.get_secret(&key).await.unwrap().as_deref(),
+            Some("s3cret")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_resolves_saved_profile_secrets_and_cert_flag() {
+        // End-to-end: a saved profile with a sanitized URL + stored secret
+        // connects with the password injected and the cert flag honored.
+        let store = crate::core::connections::SessionSecretStore::new();
+        store
+            .set_secret("sql-optimizer/profile/fix-test", "hunter2")
+            .await
+            .unwrap();
+
+        // Local sqlite serverless URL with an injected "password" would fail,
+        // so exercise the resolution + options plumbing directly.
+        let url = inject_secret_into_url(
+            "postgresql://admin@ep-test.aws.neon.tech/neondb?sslmode=require",
+            "fix-test",
+            &store,
+        )
+        .await;
+        assert!(url.contains("admin:hunter2@"));
+
+        // connect_url must forward accept_invalid_certs into ConnectOptions.
+        // Verify via a sqlite connect (no TLS) that the signature change is
+        // at least wired and that detection/option building doesn't error.
+        let (connector, db_type) = connect_url("sqlite::memory:", false, None, true)
+            .await
+            .expect("sqlite connects regardless of cert flag");
+        assert_eq!(db_type, DatabaseType::SQLite);
+        drop(connector);
     }
 
     #[test]

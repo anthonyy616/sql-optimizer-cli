@@ -424,6 +424,23 @@ pub async fn resolve_profile_url(
     Ok(url)
 }
 
+/// Resolve a profile's secret by profile ID and inject it into `url` (which
+/// must be the sanitized, password-free form). Returns the URL unchanged when
+/// no secret exists or the URL has no userinfo to inject into.
+pub async fn inject_secret_into_url(
+    url: &str,
+    profile_id: &str,
+    store: &dyn SecretStore,
+) -> String {
+    let key = format!("sql-optimizer/profile/{profile_id}");
+    match store.get_secret(&key).await {
+        Ok(Some(secret)) if !secret.is_empty() => inject_password(url, &secret)
+            .ok()
+            .unwrap_or_else(|| url.to_string()),
+        _ => url.to_string(),
+    }
+}
+
 /// Display form of a profile URL with any credentials redacted.
 pub fn redact_profile_url(url: &str) -> String {
     sanitize_url(url)
@@ -635,6 +652,28 @@ mod tests {
         assert!(!has_password_field("postgresql://u@h/db"));
         let injected = inject_password("postgresql://u@h:5/db", "p w").unwrap();
         assert_eq!(injected, "postgresql://u:p%20w@h:5/db");
+    }
+
+    #[tokio::test]
+    async fn inject_secret_into_url_restores_saved_password() {
+        let store = SessionSecretStore::new();
+        store
+            .set_secret("sql-optimizer/profile/p1", "hunter2")
+            .await
+            .unwrap();
+
+        // Sanitized URL (no password) gets the secret injected.
+        let url = inject_secret_into_url(
+            "postgresql://admin@db.host.supabase.co:5432/postgres?sslmode=require",
+            "p1",
+            &store,
+        )
+        .await;
+        assert!(url.contains("admin:hunter2@"));
+
+        // Missing secret leaves the URL untouched.
+        let unchanged = inject_secret_into_url("postgresql://u@h/db", "no-such-id", &store).await;
+        assert_eq!(unchanged, "postgresql://u@h/db");
     }
 
     #[tokio::test]

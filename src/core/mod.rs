@@ -2,6 +2,7 @@ pub mod analyzer;
 pub mod annotations;
 pub mod baseline;
 pub mod config;
+pub mod connections;
 pub mod cost;
 pub mod explain;
 pub mod fingerprint;

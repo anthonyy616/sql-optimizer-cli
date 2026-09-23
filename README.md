@@ -16,7 +16,7 @@ Supported targets: **PostgreSQL**, **MySQL**, **SQLite** (plus Supabase/Neon as 
 - **Project-wide scanning** — raw `.sql`, migrations, dbt models, app source with embedded SQL, slow-query logs; deduplicated into "top offenders"
 - **ORM-aware heuristics** — ActiveRecord / Django / Prisma / Knex shape detection, always labeled `orm-heuristic`
 - **CI integration** — `--fail-on <severity>`, distinct exit codes, baselines, `--annotate github|gitlab|sarif`, `.sql-optimizer.toml` config
-- **TUI dashboard** — full-screen interactive mode (`tui`) for analyze/schema/health/history
+- **TUI dashboard** — full-screen interactive query workspace (`tui`) with Query/Analyze/Optimize/Schema/Health/History panels, saved connection profiles (keychain-backed secrets), and read-only query previews
 
 ## Installation
 
@@ -192,15 +192,17 @@ $BIN interactive [shared flags] [--history ~/.sql-optimizer-history] [--show-row
 
 ### `tui`
 
-Full-screen terminal dashboard with five panels:
+Full-screen terminal workspace with seven panels:
 
-- **Connect** — pick a database visually: SQLite, PostgreSQL, MySQL, or Postgres-compatible clouds (Supabase, Neon). Press `Enter` on a provider to prefill its URL template, `a` to add any connection URL, `d` to delete a catalog entry. Added connections persist in a catalog for the rest of the session and can be switched at any time without restarting the TUI
-- **Analyze** — type a query, press Enter; results include recommendations, security findings, and plan summary
+- **Connect** — pick a database visually: SQLite, PostgreSQL, MySQL, or Postgres-compatible clouds (Supabase, Neon). Press `Enter` on a provider to prefill its URL template, `a` to add any connection URL, `e` to edit, `d` to delete, `r` to retry, `x` to disconnect. Saved profiles persist user-globally (`~/.config/sql-optimizer/connections.json`, no passwords in the file — secrets go to the OS credential store, e.g. macOS Keychain) and can be switched at any time without restarting the TUI
+- **Query** — type a read-only SELECT and press Enter to preview rows (writes/DDL are rejected at the connector boundary). `Ctrl+A` sends the query to Analyze. Every attempt lands in History
+- **Analyze** — type a query, press Enter; results include recommendations, security findings, and plan summary. `Ctrl+P` carries the query back to the Query tab
+- **Optimize** — the latest analysis's findings grouped and ranked: missing indexes, inefficient joins, cartesian products, N+1 patterns, rewrites — with confidence, verification status, and proposed SQL/diff as copy/preview only (nothing executes)
 - **Schema** — press `s` to refresh the introspected tree
 - **Health** — press `h` for a live stats snapshot
-- **History** — press `r` to list recent tracked runs from the local state store
+- **History** — selectable query runs with connection/status filters (`c`/`f`); `Enter` re-opens a run in Query, `Ctrl+A` analyzes it
 
-The TUI **always launches**, even with no database connection or a failing one — a connection error (bad TLS cert, refused port, wrong credentials) lands you on the Connect tab with the failing URL pre-added to the catalog so you can retry, edit, or pick a different database. SQLite (in-memory) needs no server, so it's the fastest way in.
+The TUI **always launches**, even with no database connection or a failing one — a connection error (bad TLS cert, refused port, wrong credentials) lands you on the Connect tab with the failing URL pre-added to the catalog so you can retry, edit, or pick a different database. SQLite (in-memory) needs no server, so it's the fastest way in. All database work runs on a background worker, so the UI stays responsive (loading states per tab, no frozen keys) while queries/schema/health run, and switching connections never leaks stale results.
 
 Keys: `Tab`/`←→` switch panels, `↑↓` select/scroll, `Enter` connect/analyze, `q`/`Esc` quit. Requires a real terminal (TTY).
 

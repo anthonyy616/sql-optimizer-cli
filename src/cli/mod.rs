@@ -609,10 +609,7 @@ mod tests {
     #[test]
     fn keeps_help_and_version_flags_as_first_argument() {
         for flag in ["-h", "--help", "-V", "--version"] {
-            let args = vec![
-                OsString::from("sql-optimizer-cli"),
-                OsString::from(flag),
-            ];
+            let args = vec![OsString::from("sql-optimizer-cli"), OsString::from(flag)];
 
             let normalized = normalize_invocation(args.clone());
 

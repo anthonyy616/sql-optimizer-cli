@@ -266,7 +266,7 @@ impl CommandHandler {
                         }
                     }
 
-                    let _ = store.record_run(
+                    let _ = store.record_run_basic(
                         query,
                         Some(result.execution_time_ms),
                         None,

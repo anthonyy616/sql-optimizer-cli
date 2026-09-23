@@ -164,10 +164,6 @@ fn looks_like_child_lookup(normalized: &str) -> bool {
     has_fk_filter && !normalized.contains(" id = ")
 }
 
-fn count_quoted_columns(s: &str) -> usize {
-    count_pattern(s, "\", \"")
-}
-
 fn count_pattern(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
         return 0;

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection};
 
 use crate::core::fingerprint::fingerprint;
 
@@ -13,6 +13,28 @@ pub struct QueryRun {
     pub rows_returned: Option<i64>,
     pub plan_summary: Option<String>,
     pub index_used: Option<String>,
+    /// Connection/profile identity (may be absent for legacy rows).
+    pub connection_id: Option<String>,
+    /// Display label of the connection at run time (redacted URL or profile name).
+    pub connection_label: Option<String>,
+    /// False when the run failed (errors are recorded too).
+    pub success: bool,
+    /// Error message for failed runs.
+    pub error: Option<String>,
+}
+
+/// Filters for the recent-runs listing used by the TUI History tab.
+/// All set filters compose with AND.
+#[derive(Debug, Clone, Default)]
+pub struct RecentRunsFilter {
+    /// Only runs recorded on this connection/profile ID.
+    pub connection_id: Option<String>,
+    /// Only runs with this query fingerprint.
+    pub fingerprint: Option<String>,
+    /// `Some(true)` = successful runs only, `Some(false)` = failed runs only.
+    pub status: Option<bool>,
+    /// Maximum number of rows returned.
+    pub limit: usize,
 }
 
 /// A detected regression.
@@ -39,6 +61,24 @@ pub struct StateStore {
     conn: Connection,
 }
 
+const RUN_COLUMNS: &str = "fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used, connection_id, connection_label, success, error";
+
+fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRun> {
+    Ok(QueryRun {
+        fingerprint: row.get(0)?,
+        query_text: row.get(1)?,
+        timestamp: row.get(2)?,
+        execution_time_ms: row.get(3)?,
+        rows_returned: row.get(4)?,
+        plan_summary: row.get(5)?,
+        index_used: row.get(6)?,
+        connection_id: row.get(7)?,
+        connection_label: row.get(8)?,
+        success: row.get::<_, Option<i64>>(9)?.unwrap_or(1) != 0,
+        error: row.get(10)?,
+    })
+}
+
 impl StateStore {
     /// Open or create the state store at the given path.
     pub fn open(path: &str) -> Result<Self> {
@@ -63,6 +103,23 @@ impl StateStore {
         )
         .context("Failed to initialize state store schema")?;
 
+        // Migration: add per-run connection identity and status columns when
+        // upgrading from a pre-workspace store. Each ALTER fails harmlessly
+        // when the column already exists.
+        for alter in [
+            "ALTER TABLE query_runs ADD COLUMN connection_id TEXT;",
+            "ALTER TABLE query_runs ADD COLUMN connection_label TEXT;",
+            "ALTER TABLE query_runs ADD COLUMN success INTEGER NOT NULL DEFAULT 1;",
+            "ALTER TABLE query_runs ADD COLUMN error TEXT;",
+        ] {
+            if let Err(e) = conn.execute_batch(alter) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(e).context("Failed to migrate state store schema");
+                }
+            }
+        }
+
         Ok(Self { conn })
     }
 
@@ -80,7 +137,9 @@ impl StateStore {
         std::path::Path::new(".sql-optimizer/history.sqlite").exists()
     }
 
-    /// Record a query run.
+    /// Record a query run with full workspace metadata. Never store secrets —
+    /// `connection_id`/`connection_label` are opaque identity/display values.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_run(
         &self,
         query: &str,
@@ -88,42 +147,70 @@ impl StateStore {
         rows_returned: Option<i64>,
         plan_summary: Option<&str>,
         index_used: Option<&str>,
+        connection_id: Option<&str>,
+        connection_label: Option<&str>,
+        success: bool,
+        error: Option<&str>,
     ) -> Result<()> {
         let fp = fingerprint(query);
         let ts = chrono::Utc::now().to_rfc3339();
 
         self.conn
             .execute(
-                "INSERT INTO query_runs (fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![fp, query, ts, execution_time_ms, rows_returned, plan_summary, index_used],
+                "INSERT INTO query_runs (fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used, connection_id, connection_label, success, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    fp,
+                    query,
+                    ts,
+                    execution_time_ms,
+                    rows_returned,
+                    plan_summary,
+                    index_used,
+                    connection_id,
+                    connection_label,
+                    success,
+                    error,
+                ],
             )
             .context("Failed to record query run")?;
 
         Ok(())
     }
 
+    /// Backwards-compatible recording used by the CLI path (no connection identity).
+    pub fn record_run_basic(
+        &self,
+        query: &str,
+        execution_time_ms: Option<u64>,
+        rows_returned: Option<i64>,
+        plan_summary: Option<&str>,
+        index_used: Option<&str>,
+    ) -> Result<()> {
+        self.record_run(
+            query,
+            execution_time_ms,
+            rows_returned,
+            plan_summary,
+            index_used,
+            None,
+            None,
+            true,
+            None,
+        )
+    }
+
     /// Get the last N runs for a given fingerprint.
     pub fn get_history(&self, fp: &str, limit: usize) -> Result<Vec<QueryRun>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS}
              FROM query_runs
              WHERE fingerprint = ?1
              ORDER BY timestamp DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
 
-        let rows = stmt.query_map(params![fp, limit as i64], |row| {
-            Ok(QueryRun {
-                fingerprint: row.get(0)?,
-                query_text: row.get(1)?,
-                timestamp: row.get(2)?,
-                execution_time_ms: row.get(3)?,
-                rows_returned: row.get(4)?,
-                plan_summary: row.get(5)?,
-                index_used: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![fp, limit as i64], map_run)?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -140,25 +227,46 @@ impl StateStore {
 
     /// Get the most recent N runs across all fingerprints (newest first).
     pub fn get_recent_runs(&self, limit: usize) -> Result<Vec<QueryRun>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT fingerprint, query_text, timestamp, execution_time_ms, rows_returned, plan_summary, index_used
+        self.get_recent_runs_filtered(RecentRunsFilter {
+            limit,
+            ..Default::default()
+        })
+    }
+
+    /// Filtered/paginated run listing used by the TUI History tab.
+    pub fn get_recent_runs_filtered(&self, filter: RecentRunsFilter) -> Result<Vec<QueryRun>> {
+        let mut where_clauses: Vec<&str> = Vec::new();
+        let mut values: Vec<rusqlite::types::Value> = Vec::new();
+
+        if let Some(conn_id) = &filter.connection_id {
+            where_clauses.push("connection_id = ?");
+            values.push(conn_id.clone().into());
+        }
+        if let Some(fp) = &filter.fingerprint {
+            where_clauses.push("fingerprint = ?");
+            values.push(fp.clone().into());
+        }
+        if let Some(status) = filter.status {
+            where_clauses.push("success = ?");
+            values.push((if status { 1 } else { 0 }).into());
+        }
+        values.push((filter.limit as i64).into());
+
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS}
              FROM query_runs
+             {where_sql}
              ORDER BY timestamp DESC
-             LIMIT ?1",
-        )?;
+             LIMIT ?"
+        ))?;
 
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(QueryRun {
-                fingerprint: row.get(0)?,
-                query_text: row.get(1)?,
-                timestamp: row.get(2)?,
-                execution_time_ms: row.get(3)?,
-                rows_returned: row.get(4)?,
-                plan_summary: row.get(5)?,
-                index_used: row.get(6)?,
-            })
-        })?;
-
+        let rows = stmt.query_map(params_from_iter(values.iter()), map_run)?;
         let mut results = Vec::new();
         for row in rows {
             results.push(row?);
@@ -276,4 +384,148 @@ fn extract_row_estimate(summary: &str) -> Option<f64> {
     let caps = re.captures(summary)?;
     let num_str = caps.get(1)?.as_str().replace(',', "");
     num_str.parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_in(dir: &tempfile::TempDir) -> StateStore {
+        let path = dir.path().join("history.sqlite");
+        StateStore::open(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn record_and_reload_runs_with_connection_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store
+            .record_run(
+                "SELECT * FROM users WHERE id = 1",
+                Some(12),
+                Some(1),
+                Some("~1 row"),
+                Some("idx_users_id"),
+                Some("profile-abc"),
+                Some("Local Postgres"),
+                true,
+                None,
+            )
+            .unwrap();
+        store
+            .record_run(
+                "SELECT * FROM missing_table",
+                None,
+                None,
+                None,
+                None,
+                Some("profile-abc"),
+                Some("Local Postgres"),
+                false,
+                Some("no such table"),
+            )
+            .unwrap();
+
+        let runs = store.get_recent_runs(10).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].connection_id.as_deref(), Some("profile-abc"));
+        assert_eq!(runs[0].connection_label.as_deref(), Some("Local Postgres"));
+        assert!(!runs[0].success);
+        assert_eq!(runs[0].error.as_deref(), Some("no such table"));
+        assert!(runs[1].success);
+    }
+
+    #[test]
+    fn filters_compose_with_and() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        for (conn, ok) in [("a", true), ("a", false), ("b", true)] {
+            store
+                .record_run(
+                    "SELECT 1",
+                    Some(1),
+                    None,
+                    None,
+                    None,
+                    Some(conn),
+                    Some(conn),
+                    ok,
+                    if ok { None } else { Some("boom") },
+                )
+                .unwrap();
+        }
+
+        let only_a_ok = store
+            .get_recent_runs_filtered(RecentRunsFilter {
+                connection_id: Some("a".into()),
+                status: Some(true),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(only_a_ok.len(), 1);
+        assert_eq!(only_a_ok[0].connection_id.as_deref(), Some("a"));
+        assert!(only_a_ok[0].success);
+
+        let only_failed = store
+            .get_recent_runs_filtered(RecentRunsFilter {
+                status: Some(false),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(only_failed.len(), 1);
+
+        // Fingerprint filter matches everything recorded from "SELECT 1".
+        let fp = fingerprint("SELECT 1");
+        let by_fp = store
+            .get_recent_runs_filtered(RecentRunsFilter {
+                fingerprint: Some(fp),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(by_fp.len(), 3);
+    }
+
+    #[test]
+    fn legacy_store_without_new_columns_migrates_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE query_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT NOT NULL,
+                    query_text TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    execution_time_ms INTEGER,
+                    rows_returned INTEGER,
+                    plan_summary TEXT,
+                    index_used TEXT
+                );
+                INSERT INTO query_runs (fingerprint, query_text, timestamp)
+                VALUES ('fp', 'SELECT 1', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let store = StateStore::open(path.to_str().unwrap()).unwrap();
+        let runs = store.get_recent_runs(10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].connection_id.is_none());
+        assert!(runs[0].success, "legacy rows default to success");
+    }
+
+    #[test]
+    fn record_run_basic_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store
+            .record_run_basic("SELECT 2", Some(5), None, None, None)
+            .unwrap();
+        let runs = store.get_recent_runs(5).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].connection_id.is_none());
+    }
 }

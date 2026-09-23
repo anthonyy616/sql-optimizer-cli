@@ -1,6 +1,7 @@
 # Rust
 /target/
-Cargo.lock
+# Cargo.lock is committed: reproducible release builds + stable CI cache keys
+# (hashFiles('Cargo.lock') needs the file to exist in the checkout).
 **/*.rs.bk
 *.pdb
 

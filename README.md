@@ -20,6 +20,24 @@ Supported targets: **PostgreSQL**, **MySQL**, **SQLite** (plus Supabase/Neon as 
 
 ## Installation
 
+### From npm (recommended)
+
+```bash
+npm install -g sql-optimizer-cli
+```
+
+Requirements: Node.js 18+, Linux or macOS. No Rust toolchain needed — npm downloads the prebuilt binary for your platform automatically (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64` — all Linux builds are static musl binaries that run on any distro).
+
+```bash
+sql-optimizer-cli --version
+sql-optimizer-cli schema --db sqlite::memory:
+sql-optimizer-cli                # no args → TUI dashboard
+```
+
+Typing `sql-optimizer-cli` with **no arguments**, or with only flags (e.g. `sql-optimizer-cli --db postgresql://...`), launches the TUI. Subcommands (`analyze`, `scan`, …) work exactly as documented below — in all examples, substitute `sql-optimizer-cli` for `$BIN`.
+
+The binary itself is also useful without Node afterwards; npm just delivers it.
+
 ### From Source
 ```bash
 git clone https://github.com/anthonyy616/sql-optimizer-cli.git
@@ -27,7 +45,7 @@ cd sql-optimizer-cli
 ./scripts/install.sh
 ```
 
-The install script puts `sql-optimizer-cli` on your PATH and creates shortcut commands named `analyze`, `batch`, `interactive`, `schema`, `scan`, and `tui`. During local development use `cargo run --bin sql-optimizer-cli -- ...`.
+The install script builds the binary with cargo, puts `sql-optimizer-cli` on your PATH, and creates shortcut commands named `analyze`, `batch`, `interactive`, `schema`, `scan`, and `tui`. During local development use `cargo run --bin sql-optimizer-cli -- ...`.
 
 ### Run it without installing: `scripts/env.sh`
 
@@ -174,17 +192,21 @@ $BIN interactive [shared flags] [--history ~/.sql-optimizer-history] [--show-row
 
 ### `tui`
 
-Full-screen terminal dashboard with four panels:
+Full-screen terminal dashboard with five panels:
 
+- **Connect** — pick a database visually: SQLite, PostgreSQL, MySQL, or Postgres-compatible clouds (Supabase, Neon). Press `Enter` on a provider to prefill its URL template, `a` to add any connection URL, `d` to delete a catalog entry. Added connections persist in a catalog for the rest of the session and can be switched at any time without restarting the TUI
 - **Analyze** — type a query, press Enter; results include recommendations, security findings, and plan summary
 - **Schema** — press `s` to refresh the introspected tree
 - **Health** — press `h` for a live stats snapshot
 - **History** — press `r` to list recent tracked runs from the local state store
 
-Keys: `Tab`/`←→` switch panels, `↑↓` scroll, `q`/`Esc` quit. Requires a working database connection and a real terminal.
+The TUI **always launches**, even with no database connection or a failing one — a connection error (bad TLS cert, refused port, wrong credentials) lands you on the Connect tab with the failing URL pre-added to the catalog so you can retry, edit, or pick a different database. SQLite (in-memory) needs no server, so it's the fastest way in.
+
+Keys: `Tab`/`←→` switch panels, `↑↓` select/scroll, `Enter` connect/analyze, `q`/`Esc` quit. Requires a real terminal (TTY).
 
 ```bash
-$BIN tui --db "$SQL_OPTIMIZER_DB_URL"
+$BIN tui                       # start unconnected; choose a DB in the Connect tab
+$BIN tui --db "$SQL_OPTIMIZER_DB_URL"   # connect up-front; fall back to Connect tab on failure
 ```
 
 ## CI / Pipeline Usage
@@ -212,7 +234,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install --path .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g sql-optimizer-cli
       - name: Analyze changed SQL
         env:
           SQL_OPTIMIZER_DB_URL: ${{ secrets.SQL_OPTIMIZER_DB_URL }}
@@ -225,9 +250,9 @@ jobs:
 ```yaml
 sql-analysis:
   stage: test
-  image: rust:latest
+  image: node:20
   script:
-    - cargo install --path .
+    - npm install -g sql-optimizer-cli
     - sql-optimizer-cli batch --input queries.sql --ci --annotate gitlab --output json
 ```
 
@@ -245,9 +270,37 @@ exclude = ["vendor/", "node_modules/", "*.fixture.sql"]
 
 The tool is stateless by default. Regression tracking activates when you pass `--track` **or** a `.sql-optimizer/` directory exists in the project. State lives in `.sql-optimizer/history.sqlite` — add it to `.gitignore`. Schema drift uses `.sql-optimizer/schema-snapshot.json` (created via `schema --save`).
 
+## Troubleshooting
+
+**npm install / the command**
+
+| Symptom | Cause → Fix |
+|---|---|
+| `sql-optimizer-cli: command not found` after install | npm's global bin dir is not on your PATH → `npm prefix -g` shows it; add `<prefix>/bin` to PATH (node version managers usually handle this). |
+| `No prebuilt binary for <platform>` | npm skipped the platform package → check `npm config get omit` (must not include `optional`); corporate registry mirrors sometimes filter platform packages. Fix: `npm install -g sql-optimizer-cli --include=optional` or remove `omit` from `.npmrc`. |
+| `EACCES` during global install | Don't use sudo. Point npm's prefix at a user directory (`npm config set prefix ~/.npm-global`) or use a node version manager (nvm/fnm/asdf). |
+| 404 on `npm view`/`npm install` | You may be behind a mirror that hasn't synced yet → check against the official registry: `npm view sql-optimizer-cli version --registry=https://registry.npmjs.org`. |
+| Wrapper installed but binary is an old version | A pinned/cached platform package → force a clean reinstall: `npm uninstall -g sql-optimizer-cli && npm install -g sql-optimizer-cli@latest`. |
+
+**The TUI**
+
+| Symptom | Cause → Fix |
+|---|---|
+| `Failed to enable raw mode (is this a terminal?)` | The TUI needs a real TTY — it cannot run through pipes, CI logs, or IDE output panes. Run it in a normal terminal window. |
+| TUI starts but shows `Not connected` | Expected when no `--db` was given — use the **Connect** tab: press `Enter` on a provider (SQLite needs no server) or `a` to paste any connection URL. |
+| Connection failed inside the TUI (TLS/certificate, timeout, refused) | The TUI stays open on the Connect tab with the URL in the session catalog. For TLS validity errors check your system clock and `sslmode`; for self-signed dev certs restart with `--accept-invalid-certs`. For timeouts check host/port/firewall. |
+| Garbled rendering / broken colors | Set `TERM` correctly (`xterm-256color`), or try `sql-optimizer-cli tui --db ...` after resizing the terminal. |
+
+**General**
+
+- Add `-v` to any command for verbose progress and connection details.
+- Exit codes: `0` clean · `1` findings (non-blocking) · `2` blocking findings (`--fail-on` exceeded) · `3` tool error (bad connection, missing file, …).
+- Connection failures usually mean the URL/host/port/SSL mode is wrong for your network — see the shared flags above (`--db-sslmode`, `--accept-invalid-certs` for self-signed certs in dev, `--simple-mode` behind PgBouncer).
+
 ## Requirements
 
-- Rust 1.75+
+- Node.js 18+ (npm install only; the binary itself has no runtime deps)
+- Rust 1.75+ (only when building from source)
 - PostgreSQL 12+, MySQL 8.0+, or SQLite
 - Network access to target databases
 - Linux or macOS (Windows is not supported)
@@ -261,6 +314,20 @@ cargo clippy           # lints
 cargo fmt              # formatting
 make check             # fmt + clippy + test
 ```
+
+## Releasing (maintainers)
+
+The npm package is built from this repo's Rust binary: `npm/package.json` + `npm/bin/cli.js` (wrapper) plus 4 prebuilt platform packages (`sql-optimizer-cli-{darwin-arm64,darwin-x64,linux-x64,linux-arm64}`), published by `.github/workflows/release-npm.yml` when a `vX.Y.Z` tag is pushed. Platform packages always publish before the wrapper; both steps skip versions already on npm, so tag re-runs are safe.
+
+Release flow:
+
+1. Bump versions everywhere at once: `agent/versioning/scripts/bump-version.sh X.Y.Z` (syncs `Cargo.toml`, the wrapper, and the 4 platform dependency pins).
+2. Update the changelog.
+3. `make check`, then follow `agent/versioning/checklists/release-checklist.md`.
+4. `git tag vX.Y.Z && git push origin vX.Y.Z` — CI builds all targets and publishes.
+5. Verify: `npm view sql-optimizer-cli version`, then `npm install -g sql-optimizer-cli` in a clean shell and run `sql-optimizer-cli --version`.
+
+Local npm-package test without publishing: `scripts/release-npm.sh X.Y.Z` assembles all platform packages under `npm/platform/` (add `--publish` to publish).
 
 ## License
 

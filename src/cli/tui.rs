@@ -1,15 +1,20 @@
 //! Phase "TUI": a terminal-user-interface dashboard for day-to-day use.
 //!
+//! The TUI always launches — even with no working database connection. The
+//! Connect tab lets you visually pick or add a database (SQLite, PostgreSQL,
+//! MySQL, Supabase, Neon, or any custom URL); connections persist in a
+//! catalog for the rest of the session and can be switched at any time.
+//!
 //! Layout:
 //! ┌──────────────────────────────────────────────────────────────┐
 //! │ sql-optimizer-cli ● postgresql://…   profile: oltp           │  header
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ [Analyze] [Schema] [Health] [History]                        │  tab bar
+//! │ [Connect] [Analyze] [Schema] [Health] [History]              │  tab bar
 //! │                                                              │
 //! │                 active tab content                           │
 //! │                                                              │
 //! ├──────────────────────────────────────────────────────────────┤
-//! │ SQL> select * from users where email = 'x'                   │  input (Analyze)
+//! │ SQL> select * from users where email = 'x'                   │  input (Analyze / Connect forms)
 //! ├──────────────────────────────────────────────────────────────┤
 //! │ Tab: switch · Enter: run · ↑↓: scroll · e: explain · q/Esc   │  footer
 //! └──────────────────────────────────────────────────────────────┘
@@ -33,7 +38,121 @@ use std::io;
 use crate::cli::ConnectionArgs;
 use crate::core::types::*;
 
-const TABS: &[&str] = &["Analyze", "Schema", "Health", "History"];
+const TABS: &[&str] = &["Connect", "Analyze", "Schema", "Health", "History"];
+
+const TAB_CONNECT: usize = 0;
+const TAB_ANALYZE: usize = 1;
+const TAB_SCHEMA: usize = 2;
+const TAB_HEALTH: usize = 3;
+const TAB_HISTORY: usize = 4;
+
+// Connect-tab list geometry: rows 1..=5 = the five provider presets,
+// row 6 = "Session connections" header, rows 7.. = user-added catalog entries.
+const PROVIDER_FIRST_ROW: usize = 1;
+const PROVIDER_LAST_ROW: usize = 5;
+const SESSION_FIRST_ROW: usize = 7;
+
+/// Database provider shown in the Connect catalog. Supabase and Neon are
+/// Postgres-compatible; the distinction is cosmetic labeling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provider {
+    Sqlite,
+    Postgres,
+    Mysql,
+    Supabase,
+    Neon,
+}
+
+impl Provider {
+    fn label(self) -> &'static str {
+        match self {
+            Provider::Sqlite => "SQLite",
+            Provider::Postgres => "PostgreSQL",
+            Provider::Mysql => "MySQL",
+            Provider::Supabase => "Supabase",
+            Provider::Neon => "Neon",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Provider::Sqlite => Color::LightYellow,
+            Provider::Postgres => Color::Blue,
+            Provider::Mysql => Color::Cyan,
+            Provider::Supabase => Color::Green,
+            Provider::Neon => Color::Magenta,
+        }
+    }
+
+    /// Template connection string used to prefill the add-connection form.
+    fn template(self) -> &'static str {
+        match self {
+            Provider::Sqlite => "sqlite::memory:",
+            Provider::Postgres => "postgresql://user:password@localhost:5432/postgres?sslmode=require",
+            Provider::Mysql => "mysql://user:password@localhost:3306/mydb",
+            Provider::Supabase => {
+                "postgresql://postgres:password@db.<project-ref>.supabase.co:5432/postgres?sslmode=require"
+            }
+            Provider::Neon => {
+                "postgresql://user:password@ep-<endpoint>.<region>.aws.neon.tech/neondb?sslmode=require"
+            }
+        }
+    }
+
+    fn blurb(self) -> &'static str {
+        match self {
+            Provider::Sqlite => "zero-setup — in-memory or a local .db file",
+            Provider::Postgres => "local or self-hosted server",
+            Provider::Mysql => "local or self-hosted server",
+            Provider::Supabase => "Postgres-compatible — use the session pooler URL",
+            Provider::Neon => "Postgres-compatible — serverless connection string",
+        }
+    }
+}
+
+const PROVIDERS: &[Provider] = &[
+    Provider::Sqlite,
+    Provider::Postgres,
+    Provider::Mysql,
+    Provider::Supabase,
+    Provider::Neon,
+];
+
+/// Detect the provider from a connection string (cosmetic only).
+fn provider_from_url(url: &str) -> Option<Provider> {
+    let lower = url.to_lowercase();
+    if lower.starts_with("sqlite") || lower.ends_with(".db") || lower.ends_with(".sqlite") {
+        Some(Provider::Sqlite)
+    } else if lower.starts_with("mysql") {
+        Some(Provider::Mysql)
+    } else if lower.starts_with("postgres") {
+        if lower.contains("supabase") {
+            Some(Provider::Supabase)
+        } else if lower.contains("neon.tech") {
+            Some(Provider::Neon)
+        } else {
+            Some(Provider::Postgres)
+        }
+    } else {
+        None
+    }
+}
+
+/// A connection saved in the catalog. Lives for the whole TUI session.
+#[derive(Debug, Clone)]
+struct ConnectionEntry {
+    name: String,
+    url: String,
+    provider: Option<Provider>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnInputStage {
+    /// Collecting/editing the connection URL.
+    Url,
+    /// URL accepted; collecting a display name.
+    Name,
+}
 
 struct App {
     tab: usize,
@@ -50,12 +169,33 @@ struct App {
     profile: Profile,
     status: String,
     running_analysis: bool,
+
+    // Connection state: `connector` is replaceable so sessions can switch
+    // databases from the Connect tab without restarting the TUI.
+    connector: Option<Box<dyn crate::database::connection::DatabaseConnector>>,
+
+    // Connect-tab catalog + form state.
+    connections: Vec<ConnectionEntry>,
+    conn_list_state: ListState,
+    conn_input: String,
+    conn_input_stage: Option<ConnInputStage>,
+    pending_conn_url: String,
+
+    // Connection options captured from the CLI invocation.
+    simple_mode: bool,
+    connect_timeout: Option<u64>,
 }
 
 impl App {
-    fn new(profile: Profile) -> Self {
+    fn new(profile: Profile, simple_mode: bool, connect_timeout: Option<u64>) -> Self {
+        // Start the session catalog with one always-available entry.
+        let connections = vec![ConnectionEntry {
+            name: "SQLite (in-memory demo)".to_string(),
+            url: "sqlite::memory:".to_string(),
+            provider: Some(Provider::Sqlite),
+        }];
         Self {
-            tab: 0,
+            tab: TAB_CONNECT,
             input: String::new(),
             results: Vec::new(),
             selected_result: None,
@@ -67,9 +207,21 @@ impl App {
             db_type: None,
             db_label: "(not connected)".to_string(),
             profile,
-            status: "Ready.".to_string(),
+            status: "Not connected — pick a database in the Connect tab.".to_string(),
             running_analysis: false,
+            connector: None,
+            connections,
+            conn_list_state: ListState::default(),
+            conn_input: String::new(),
+            conn_input_stage: None,
+            pending_conn_url: String::new(),
+            simple_mode,
+            connect_timeout,
         }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connector.is_some()
     }
 }
 
@@ -79,28 +231,56 @@ pub async fn run_tui(
     connect_timeout: Option<u64>,
     verbose: bool,
 ) -> Result<i32> {
-    // Connect up-front so the whole session reuses one connector.
-    let connect_result = if connection.has_connection() {
+    let mut app = Box::new(App::new(Profile::Oltp, simple_mode, connect_timeout));
+    let _ = verbose;
+
+    // Try the CLI-provided connection, but never hard-fail: on error we land
+    // on the Connect tab with the URL added to the catalog so it can be
+    // retried or edited interactively.
+    if connection.has_connection() {
+        let cli_url = connection.resolve_connection_string().ok();
         let handler = crate::cli::commands::CommandHandler::new();
         match handler
             .connect_internal(connection, simple_mode, connect_timeout)
             .await
         {
-            Ok(connector_and_type) => Some(connector_and_type),
-            Err(e) => return Err(e.context("TUI requires a working database connection")),
+            Ok((connector, db_type)) => {
+                app.connector = Some(connector);
+                app.db_type = Some(db_type);
+                if let Some(url) = &cli_url {
+                    app.db_label = redact_url(url);
+                    app.connections.push(ConnectionEntry {
+                        name: "CLI-provided connection".to_string(),
+                        url: url.clone(),
+                        provider: provider_from_url(url),
+                    });
+                }
+                app.tab = TAB_ANALYZE;
+                app.status = "Connected. Type a SQL query below and press Enter.".into();
+            }
+            Err(e) => {
+                app.tab = TAB_CONNECT;
+                app.status = format!(
+                    "Connection failed: {e}. Pick or add a database below — Enter connects, 'a' adds a URL."
+                );
+                if let Some(url) = &cli_url {
+                    app.connections.push(ConnectionEntry {
+                        name: "CLI-provided connection (failed)".to_string(),
+                        url: url.clone(),
+                        provider: provider_from_url(url),
+                    });
+                    app.conn_list_state
+                        .select(Some(SESSION_FIRST_ROW + app.connections.len() - 1));
+                }
+            }
         }
     } else {
-        None
-    };
-
-    if connect_result.is_none() {
-        anyhow::bail!(
-            "The TUI needs a database connection. Pass --db or set SQL_OPTIMIZER_DB_URL."
-        );
+        app.tab = TAB_CONNECT;
+        app.conn_list_state.select(Some(PROVIDER_FIRST_ROW));
+        app.status =
+            "Not connected — choose a provider below, or press 'a' to add a connection URL."
+                .into();
     }
-
-    let (connector, db_type) = connect_result.unwrap();
-    let _ = verbose;
 
     enable_raw_mode().context("Failed to enable raw mode (is this a terminal?)")?;
     let mut stdout = io::stdout();
@@ -108,11 +288,7 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
-    let mut app = Box::new(App::new(Profile::Oltp));
-    app.db_type = Some(db_type);
-    app.db_label = redact_url(&connection.resolve_connection_string().unwrap_or_default());
-
-    let res = run_event_loop(&mut terminal, &mut app, connector).await;
+    let res = run_event_loop(&mut terminal, &mut app).await;
     // Restore terminal no matter what.
     disable_raw_mode().ok();
     execute!(
@@ -139,12 +315,203 @@ fn redact_url(url: &str) -> String {
     url.to_string()
 }
 
+/// Connect to a catalog URL, replacing the current connector on success.
+/// Failure keeps the existing connection (if any) and reports hints.
+async fn connect_entry(app: &mut App, url: String) {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        app.status = "Connection URL is empty.".into();
+        return;
+    }
+    if provider_from_url(&url).is_none() {
+        app.status = "Unrecognized URL. Must start with postgresql://, mysql://, or sqlite:// \
+                      (or end with .db / .sqlite)."
+            .into();
+        return;
+    }
+
+    app.status = format!("Connecting to {}…", redact_url(&url));
+    let handler = crate::cli::commands::CommandHandler::new();
+    let conn_args = ConnectionArgs {
+        db: Some(url.clone()),
+        ..Default::default()
+    };
+    match handler
+        .connect_internal(&conn_args, app.simple_mode, app.connect_timeout)
+        .await
+    {
+        Ok((connector, db_type)) => {
+            app.connector = Some(connector);
+            app.db_type = Some(db_type);
+            app.db_label = redact_url(&url);
+            // Reset per-connection state so stale schema/health from a
+            // previous database is never shown.
+            app.schema = None;
+            app.schema_list_state.select(None);
+            app.health_lines =
+                vec!["Press 'h' on this tab to refresh the health snapshot.".into()];
+            app.tab = TAB_ANALYZE;
+            app.status = format!("Connected to {} ({}).", redact_url(&url), db_type_name(db_type));
+        }
+        Err(e) => {
+            let mut msg = format!("Connection failed: {e}");
+            let lower = e.to_string().to_lowercase();
+            if lower.contains("certificate") || lower.contains("tls") {
+                msg.push_str(
+                    " — TLS/certificate issue: check your system clock, the sslmode parameter, \
+                     or restart with --accept-invalid-certs for self-signed certs.",
+                );
+            } else if lower.contains("timeout") || lower.contains("refused") {
+                msg.push_str(" — check host, port, and network/firewall access.");
+            }
+            app.status = msg;
+        }
+    }
+}
+
+fn db_type_name(db_type: DatabaseType) -> &'static str {
+    match db_type {
+        DatabaseType::PostgreSQL => "PostgreSQL",
+        DatabaseType::MySQL => "MySQL",
+        DatabaseType::SQLite => "SQLite",
+    }
+}
+
+fn default_entry_name(url: &str, provider: Provider) -> String {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let rest = rest.split('?').next().unwrap_or(rest);
+    let redacted = redact_url(rest);
+    format!("{} · {}", provider.label(), redacted)
+}
+
+fn is_valid_conn_row(row: usize, entries: usize) -> bool {
+    (PROVIDER_FIRST_ROW..=PROVIDER_LAST_ROW).contains(&row)
+        || (SESSION_FIRST_ROW..SESSION_FIRST_ROW + entries).contains(&row)
+}
+
+fn move_conn_selection(app: &mut App, forward: bool) {
+    let entries = app.connections.len();
+    let total = SESSION_FIRST_ROW + entries;
+    let mut row = app.conn_list_state.selected().unwrap_or(PROVIDER_FIRST_ROW);
+    for _ in 0..total {
+        row = if forward {
+            (row + 1).min(total.saturating_sub(1))
+        } else {
+            row.saturating_sub(1)
+        };
+        if is_valid_conn_row(row, entries) {
+            break;
+        }
+    }
+    app.conn_list_state.select(Some(row));
+}
+
+/// Enter on the Connect tab: prefill the add-connection form from a provider
+/// preset, or connect to the selected catalog entry.
+fn handle_connect_enter(app: &mut App) {
+    let row = app.conn_list_state.selected().unwrap_or(PROVIDER_FIRST_ROW);
+
+    if (PROVIDER_FIRST_ROW..=PROVIDER_LAST_ROW).contains(&row) {
+        let provider = PROVIDERS[row - PROVIDER_FIRST_ROW];
+        app.conn_input = provider.template().to_string();
+        app.pending_conn_url.clear();
+        app.conn_input_stage = Some(ConnInputStage::Url);
+        app.status = format!(
+            "{}: edit the URL and press Enter (Esc cancels).",
+            provider.label()
+        );
+    } else if let Some(entry) = app
+        .connections
+        .get(row - SESSION_FIRST_ROW)
+        .cloned()
+    {
+        // Trigger the async connect; run via the event loop's block_on-free
+        // path by storing it as the pending action.
+        app.pending_conn_url = entry.url;
+    }
+}
+
+async fn handle_connect_input_enter(app: &mut App) {
+    let stage = match app.conn_input_stage {
+        Some(s) => s,
+        None => return,
+    };
+    match stage {
+        ConnInputStage::Url => {
+            let url = app.conn_input.trim().to_string();
+            match provider_from_url(&url) {
+                Some(provider) => {
+                    app.pending_conn_url = url.clone();
+                    app.conn_input = default_entry_name(&url, provider);
+                    app.conn_input_stage = Some(ConnInputStage::Name);
+                    app.status = "Name this connection and press Enter to connect.".into();
+                }
+                None => {
+                    app.status = "Unrecognized URL. Must start with postgresql://, mysql://, \
+                                  or sqlite:// (or end with .db / .sqlite)."
+                        .into();
+                }
+            }
+        }
+        ConnInputStage::Name => {
+            let name = app.conn_input.trim().to_string();
+            if name.is_empty() {
+                app.status = "Enter a name for this connection.".into();
+                return;
+            }
+            let url = std::mem::take(&mut app.pending_conn_url);
+            let provider = provider_from_url(&url);
+            app.connections.push(ConnectionEntry {
+                name,
+                url,
+                provider,
+            });
+            app.conn_list_state
+                .select(Some(SESSION_FIRST_ROW + app.connections.len() - 1));
+            app.conn_input_stage = None;
+            app.conn_input.clear();
+            let url = app.connections.last().unwrap().url.clone();
+            connect_entry(app, url).await;
+        }
+    }
+}
+
+fn delete_selected_connection(app: &mut App) {
+    let row = app.conn_list_state.selected().unwrap_or(0);
+    let idx = match row.checked_sub(SESSION_FIRST_ROW) {
+        Some(i) if i < app.connections.len() => i,
+        _ => return,
+    };
+    let name = app.connections[idx].name.clone();
+    app.connections.remove(idx);
+    let entries = app.connections.len();
+    let new_row = if entries == 0 {
+        PROVIDER_LAST_ROW
+    } else {
+        SESSION_FIRST_ROW + idx.min(entries - 1)
+    };
+    app.conn_list_state.select(Some(new_row));
+    app.status = format!("Removed '{name}' from the session catalog.");
+}
+
 async fn run_event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    connector: Box<dyn crate::database::connection::DatabaseConnector>,
 ) -> Result<i32> {
     loop {
+        // Consume a pending connect action triggered from list mode.
+        let pending = if app.pending_conn_url.is_empty() || app.conn_input_stage.is_some() {
+            None
+        } else {
+            Some(std::mem::take(&mut app.pending_conn_url))
+        };
+        if let Some(url) = pending {
+            connect_entry(app, url).await;
+            if app.connector.is_some() {
+                continue; // redraw immediately in the new state
+            }
+        }
+
         terminal.draw(|f| draw(f, app))?;
 
         // Non-blocking-ish wait for input.
@@ -157,41 +524,94 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                 continue;
             }
 
+            let in_conn_form = app.tab == TAB_CONNECT && app.conn_input_stage.is_some();
+
             match key.code {
+                // Esc cancels the connect form first, otherwise quits.
+                KeyCode::Esc if in_conn_form => {
+                    app.conn_input_stage = None;
+                    app.conn_input.clear();
+                    app.pending_conn_url.clear();
+                    app.status = "Connection form cancelled.".into();
+                }
                 KeyCode::Esc => return Ok(0),
-                KeyCode::Char('q') if key.modifiers.is_empty() && app.tab != 0 => return Ok(0),
                 KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(0)
                 }
-                KeyCode::Tab | KeyCode::Right if !matches!(key.modifiers, KeyModifiers::SHIFT) => {
+                KeyCode::Char('q')
+                    if key.modifiers.is_empty()
+                        && app.tab != TAB_ANALYZE
+                        && !in_conn_form =>
+                {
+                    return Ok(0)
+                }
+                KeyCode::Tab | KeyCode::Right
+                    if !matches!(key.modifiers, KeyModifiers::SHIFT) && !in_conn_form =>
+                {
                     app.tab = (app.tab + 1) % TABS.len();
                     app.input.clear(); // right arrow doubles as text nav only in input
                 }
-                KeyCode::BackTab => app.tab = (app.tab + TABS.len() - 1) % TABS.len(),
-                KeyCode::Left => {
+                KeyCode::BackTab if !in_conn_form => {
+                    app.tab = (app.tab + TABS.len() - 1) % TABS.len()
+                }
+                KeyCode::Left if !in_conn_form => {
                     app.tab = (app.tab + TABS.len() - 1) % TABS.len();
                 }
                 KeyCode::Down => {
-                    app.result_scroll = app.result_scroll.saturating_add(1);
-                    next_schema_item(app);
+                    if app.tab == TAB_CONNECT && !in_conn_form {
+                        move_conn_selection(app, true);
+                    } else {
+                        app.result_scroll = app.result_scroll.saturating_add(1);
+                        next_schema_item(app);
+                    }
                 }
                 KeyCode::Up => {
-                    app.result_scroll = app.result_scroll.saturating_sub(1);
-                    prev_schema_item(app);
+                    if app.tab == TAB_CONNECT && !in_conn_form {
+                        move_conn_selection(app, false);
+                    } else {
+                        app.result_scroll = app.result_scroll.saturating_sub(1);
+                        prev_schema_item(app);
+                    }
                 }
-                KeyCode::Char(c) if app.tab == 0 => {
+
+                // ---- Connect tab ----
+                KeyCode::Char(c) if in_conn_form => {
+                    app.conn_input.push(c);
+                }
+                KeyCode::Backspace if in_conn_form => {
+                    app.conn_input.pop();
+                }
+                KeyCode::Enter if app.tab == TAB_CONNECT && in_conn_form => {
+                    handle_connect_input_enter(app).await;
+                }
+                KeyCode::Enter if app.tab == TAB_CONNECT => {
+                    handle_connect_enter(app);
+                }
+                KeyCode::Char('a') if app.tab == TAB_CONNECT && !in_conn_form => {
+                    app.conn_input.clear();
+                    app.conn_input_stage = Some(ConnInputStage::Url);
+                    app.status =
+                        "Enter a connection URL (postgresql://, mysql://, sqlite://) and press Enter."
+                            .into();
+                }
+                KeyCode::Char('d') if app.tab == TAB_CONNECT && !in_conn_form => {
+                    delete_selected_connection(app);
+                }
+
+                // ---- Analyze tab ----
+                KeyCode::Char(c) if app.tab == TAB_ANALYZE => {
                     // Analyze tab: typing goes into the query input.
                     match c {
                         'h' if app.input.is_empty() && key.modifiers.is_empty() => {
-                            refresh_health(app, connector.as_ref());
+                            with_connector(app, |app, connector| refresh_health(app, connector));
                         }
                         _ => app.input.push(c),
                     }
                 }
-                KeyCode::Backspace if app.tab == 0 => {
+                KeyCode::Backspace if app.tab == TAB_ANALYZE => {
                     app.input.pop();
                 }
-                KeyCode::Enter if app.tab == 0 && !app.running_analysis => {
+                KeyCode::Enter if app.tab == TAB_ANALYZE && !app.running_analysis => {
                     let query = app.input.trim().to_string();
                     if query.is_empty() {
                         app.status = "Type a SQL query first.".into();
@@ -200,15 +620,25 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                     if query.eq_ignore_ascii_case("quit") || query.eq_ignore_ascii_case("exit") {
                         return Ok(0);
                     }
+                    if app.connector.is_none() {
+                        app.status = "Not connected — switch to the Connect tab (Tab/←) and pick \
+                                      a database first."
+                            .into();
+                        continue;
+                    }
                     app.running_analysis = true;
                     app.status = "Analyzing…".into();
 
                     let db_type = app.db_type.unwrap_or(DatabaseType::SQLite);
                     let profile = app.profile.clone();
-                    let analysis = std::panic::AssertUnwindSafe(async {
-                        run_analysis(connector.as_ref(), query.clone(), db_type, profile).await
-                    });
-                    match analysis.0.await {
+                    let connector = app.connector.take();
+                    let result = match connector.as_deref() {
+                        Some(conn) => {
+                            run_analysis(conn, query.clone(), db_type, profile).await
+                        }
+                        None => Err(anyhow::anyhow!("No database connection.")),
+                    };
+                    match result {
                         Ok(result) => {
                             app.results.insert(0, result);
                             app.selected_result = Some(0);
@@ -219,24 +649,47 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                             app.status = format!("Error: {}", e);
                         }
                     }
+                    app.connector = connector;
                     app.running_analysis = false;
                 }
-                KeyCode::Char('e') if app.tab == 0 && !app.input.is_empty() => {
+                KeyCode::Char('e')
+                    if app.tab == TAB_ANALYZE && !app.input.is_empty() =>
+                {
                     app.status = "Tip: add EXPLAIN via CLI flag --explain; TUI shows the plan summary automatically when present.".into();
                 }
-                KeyCode::Char('s') if app.tab == 1 => {
-                    refresh_schema(app, connector.as_ref());
+
+                // ---- Other tabs ----
+                KeyCode::Char('s') if app.tab == TAB_SCHEMA => {
+                    with_connector(app, |app, connector| refresh_schema(app, connector));
                 }
-                KeyCode::Char('h') if app.tab == 2 => {
-                    refresh_health(app, connector.as_ref());
+                KeyCode::Char('h') if app.tab == TAB_HEALTH => {
+                    with_connector(app, |app, connector| refresh_health(app, connector));
                 }
-                KeyCode::Char('r') if app.tab == 3 => {
+                KeyCode::Char('r') if app.tab == TAB_HISTORY => {
                     refresh_history(app);
                 }
                 _ => {}
             }
         }
     }
+}
+
+/// Run a connector-using helper while the connector is temporarily moved out
+/// of `app` to avoid overlapping borrows.
+fn with_connector(
+    app: &mut App,
+    f: impl FnOnce(&mut App, &dyn crate::database::connection::DatabaseConnector),
+) {
+    let connector = app.connector.take();
+    match connector.as_deref() {
+        Some(conn) => f(app, conn),
+        None => {
+            app.status = "Not connected — switch to the Connect tab (Tab/←) and pick a database \
+                          first."
+                .into();
+        }
+    }
+    app.connector = connector;
 }
 
 async fn run_analysis(
@@ -437,7 +890,7 @@ fn draw(f: &mut Frame, app: &App) {
             Constraint::Length(1), // header
             Constraint::Length(3), // tabs
             Constraint::Min(5),    // content
-            Constraint::Length(3), // input (analyze tab)
+            Constraint::Length(3), // input (analyze tab / connect form)
             Constraint::Length(1), // footer
         ])
         .split(f.area());
@@ -446,25 +899,28 @@ fn draw(f: &mut Frame, app: &App) {
     draw_tabs(f, app, chunks[1]);
 
     match app.tab {
-        0 => draw_analyze(f, app, chunks[2]),
-        1 => draw_schema(f, app, chunks[2]),
-        2 => draw_health(f, app, chunks[2]),
+        TAB_CONNECT => draw_connect(f, app, chunks[2]),
+        TAB_ANALYZE => draw_analyze(f, app, chunks[2]),
+        TAB_SCHEMA => draw_schema(f, app, chunks[2]),
+        TAB_HEALTH => draw_health(f, app, chunks[2]),
         _ => draw_history(f, app, chunks[2]),
     }
 
-    if app.tab == 0 {
-        draw_input(f, app, chunks[3]);
+    let show_sql_input = app.tab == TAB_ANALYZE;
+    let show_conn_form = app.tab == TAB_CONNECT && app.conn_input_stage.is_some();
+
+    if show_sql_input {
+        draw_sql_input(f, app, chunks[3]);
+    } else if show_conn_form {
+        draw_conn_form(f, app, chunks[3]);
     }
 
-    draw_footer(
-        f,
-        app,
-        if app.tab == 0 {
-            chunks[4]
-        } else {
-            chunks[3].merge_up(chunks[4])
-        },
-    );
+    let footer_area = if show_sql_input || show_conn_form {
+        chunks[4]
+    } else {
+        chunks[3].merge_up(chunks[4])
+    };
+    draw_footer(f, app, footer_area);
 }
 
 trait MergeUp {
@@ -493,8 +949,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(" "),
         Span::styled(
-            if app.db_type.is_some() { "●" } else { "○" },
-            Style::default().fg(if app.db_type.is_some() {
+            if app.is_connected() { "●" } else { "○" },
+            Style::default().fg(if app.is_connected() {
                 Color::Green
             } else {
                 Color::Red
@@ -521,20 +977,114 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_connect(f: &mut Frame, app: &App, area: Rect) {
+    let mut items: Vec<ListItem> = Vec::new();
+
+    items.push(ListItem::new(Line::from(Span::styled(
+        "Providers — press Enter to prefill a template:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))));
+    for provider in PROVIDERS {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("  ● ", Style::default().fg(provider.color())),
+            Span::styled(
+                format!("{:<11}", provider.label()),
+                Style::default()
+                    .fg(provider.color())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(provider.blurb(), Style::default().fg(Color::DarkGray)),
+        ])));
+    }
+
+    items.push(ListItem::new(Line::from(Span::styled(
+        "Session connections (persist for this TUI session):",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))));
+    if app.connections.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (none yet — press 'a' to add a URL, or prefill from a provider)",
+            Style::default().fg(Color::DarkGray),
+        ))));
+    }
+    for entry in &app.connections {
+        let connected = app.is_connected() && redact_url(&entry.url) == app.db_label;
+        let (marker, color) = if connected {
+            ("● ", Color::Green)
+        } else {
+            ("○ ", Color::DarkGray)
+        };
+        let provider_label = entry
+            .provider
+            .map(|p| format!("{:<11}", p.label()))
+            .unwrap_or_else(|| format!("{:<11}", "Custom"));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("  {marker}"), Style::default().fg(color)),
+            Span::styled(
+                provider_label,
+                Style::default()
+                    .fg(entry.provider.map(|p| p.color()).unwrap_or(Color::Gray))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(entry.name.clone()),
+            Span::styled(
+                format!("  —  {}", redact_url(&entry.url)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])));
+    }
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Connect — choose a database (a: add · d: delete) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut state = app.conn_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 fn draw_analyze(f: &mut Frame, app: &App, area: Rect) {
     if app.results.is_empty() {
-        let help = Paragraph::new(vec![
+        let mut help = vec![
             Line::from(Span::styled(
                 "Welcome!",
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("Type a SQL query below and press Enter to analyze it."),
-            Line::from("Results appear here with recommendations, security findings,"),
-            Line::from("regressions, and a plain-English EXPLAIN summary."),
-        ])
-        .wrap(Wrap { trim: true });
-        f.render_widget(help, area);
+        ];
+        if app.is_connected() {
+            help.push(Line::from("Type a SQL query below and press Enter to analyze it."));
+            help.push(Line::from(
+                "Results appear here with recommendations, security findings,",
+            ));
+            help.push(Line::from("regressions, and a plain-English EXPLAIN summary."));
+        } else {
+            help.push(Line::from(Span::styled(
+                "No database connected.",
+                Style::default().fg(Color::Yellow),
+            )));
+            help.push(Line::from(
+                "Switch to the Connect tab (Tab or ←) and pick a provider to get started.",
+            ));
+            help.push(Line::from(""));
+            help.push(Line::from(
+                "Tip: SQLite (in-memory) needs no server — select it and press Enter.",
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(help).wrap(Wrap { trim: true }),
+            area,
+        );
         return;
     }
 
@@ -670,11 +1220,12 @@ fn draw_schema(f: &mut Frame, app: &App, area: Rect) {
     let schema = match &app.schema {
         Some(s) => s,
         None => {
-            f.render_widget(
-                Paragraph::new("No schema loaded yet. Press 's' to introspect the database.")
-                    .wrap(Wrap { trim: true }),
-                area,
-            );
+            let msg = if app.is_connected() {
+                "No schema loaded yet. Press 's' to introspect the database."
+            } else {
+                "Not connected — connect to a database in the Connect tab, then press 's'."
+            };
+            f.render_widget(Paragraph::new(msg).wrap(Wrap { trim: true }), area);
             return;
         }
     };
@@ -768,7 +1319,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+fn draw_sql_input(f: &mut Frame, app: &App, area: Rect) {
     let prompt = format!("SQL> {}", app.input);
     f.render_widget(
         Paragraph::new(prompt).block(
@@ -780,24 +1331,61 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         area,
     );
     // Position the cursor at end of input.
-    let inner = area;
-    let x = (inner.x + 6 + app.input.chars().count() as u16).min(inner.width.saturating_sub(2));
-    let y = inner.y + 1;
+    let x = (area.x + 6 + app.input.chars().count() as u16).min(area.width.saturating_sub(2));
+    let y = area.y + 1;
+    f.set_cursor_position(ratatui::layout::Position::new(x, y));
+}
+
+fn draw_conn_form(f: &mut Frame, app: &App, area: Rect) {
+    let (title, content) = match app.conn_input_stage {
+        Some(ConnInputStage::Url) => (
+            " New connection — URL (Enter: next · Esc: cancel) ",
+            format!("URL> {}", app.conn_input),
+        ),
+        Some(ConnInputStage::Name) => (
+            " New connection — display name (Enter: connect · Esc: cancel) ",
+            format!("Name> {}", app.conn_input),
+        ),
+        None => (" New connection ", String::new()),
+    };
+    let prefix_len = match app.conn_input_stage {
+        Some(ConnInputStage::Url) => "URL> ".len(),
+        _ => "Name> ".len(),
+    };
+    f.render_widget(
+        Paragraph::new(content).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green))
+                .title(title),
+        ),
+        area,
+    );
+    let x = (area.x + 2 + prefix_len as u16 + app.conn_input.chars().count() as u16)
+        .min(area.width.saturating_sub(2));
+    let y = area.y + 1;
     f.set_cursor_position(ratatui::layout::Position::new(x, y));
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let hint = if app.tab == 0 {
-        format!(
+    let hint = match app.tab {
+        TAB_CONNECT if app.conn_input_stage.is_some() => format!(
+            " Enter: next · Esc: cancel  |  {}",
+            app.status
+        ),
+        TAB_CONNECT => format!(
+            " ↑↓: select · Enter: connect/prefill · a: add URL · d: delete · Tab/←→: panels · q/Esc: quit  |  {}",
+            app.status
+        ),
+        TAB_ANALYZE => format!(
             " Tab: switch panel · Enter: analyze · ↑↓: scroll · h: health · q/Esc: quit   |   {}   |   {}",
             app.status,
             if app.running_analysis { "working…" } else { "" }
-        )
-    } else {
-        format!(
+        ),
+        _ => format!(
             " ←→/Tab: switch panel · ↑↓: scroll · s: schema · h: health · r: history · q/Esc: quit   |   {}",
             app.status
-        )
+        ),
     };
     f.render_widget(
         Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),

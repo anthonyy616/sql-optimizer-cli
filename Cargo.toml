@@ -1,6 +1,6 @@
 [package]
 name = "sql-optimizer-cli"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Your Name <your.email@example.com>"]
 description = "Intelligent SQL query optimization advisor for PostgreSQL and MySQL"

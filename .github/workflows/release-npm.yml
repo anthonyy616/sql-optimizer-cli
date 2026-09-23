@@ -131,6 +131,9 @@ jobs:
           # npm pkg set (unlike npm version) does not error when the value is
           # unchanged — the wrapper may already carry this version.
           npm pkg set version="$VERSION"
+          for suffix in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            npm pkg set "optionalDependencies.sql-optimizer-cli-${suffix}=$VERSION"
+          done
           if npm view "sql-optimizer-cli@$VERSION" version >/dev/null 2>&1; then
             echo "sql-optimizer-cli@$VERSION already published — skipping"
           else

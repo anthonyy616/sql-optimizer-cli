@@ -35,9 +35,9 @@
     "bin/"
   ],
   "optionalDependencies": {
-    "sql-optimizer-cli-darwin-arm64": "0.1.1",
-    "sql-optimizer-cli-darwin-x64": "0.1.1",
-    "sql-optimizer-cli-linux-arm64": "0.1.1",
-    "sql-optimizer-cli-linux-x64": "0.1.1"
+    "sql-optimizer-cli-darwin-arm64": "0.1.2",
+    "sql-optimizer-cli-darwin-x64": "0.1.2",
+    "sql-optimizer-cli-linux-arm64": "0.1.2",
+    "sql-optimizer-cli-linux-x64": "0.1.2"
   }
 }

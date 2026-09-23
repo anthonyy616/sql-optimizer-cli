@@ -133,7 +133,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#v}"
-          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
             echo "Release tag $VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
             exit 1

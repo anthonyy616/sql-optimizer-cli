@@ -32,6 +32,12 @@ fi
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT"
 
+CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+if [ "$VERSION" != "$CARGO_VERSION" ]; then
+  echo "Release version $VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+  exit 1
+fi
+
 OUT_DIR="npm/platform"
 BIN_NAME="sql-optimizer-cli"
 

@@ -50,6 +50,12 @@ jobs:
 
       - name: Build
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
+            echo "Release tag $VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
           rustup target add ${{ matrix.target }}
           if [[ "${{ matrix.target }}" == *musl* ]]; then
             # cross runs the build inside a container with musl-gcc, perl and
@@ -127,6 +133,11 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
+            echo "Release tag $VERSION does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
           cd npm
           # npm pkg set (unlike npm version) does not error when the value is
           # unchanged — the wrapper may already carry this version.
